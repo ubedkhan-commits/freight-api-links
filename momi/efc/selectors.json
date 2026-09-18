@@ -1,0 +1,18 @@
+{
+  "_comment": "Selector calibration for EFC (us.eftcloud.com). Each key is a list tried in order — first match wins. If a run fails, open the saved artifacts/<step>.png + .html, find the right selector, and add it to the FRONT of the list. No code changes needed.",
+  "login": {
+    "username": ["#UserName", "#Username", "#username", "input[name='UserName']", "input[name='username']", "input[type='text'][name*='user' i]", "input[type='email']"],
+    "password": ["#Password", "#password", "input[name='Password']", "input[type='password']"],
+    "submit": ["button[type='submit']", "input[type='submit']", "#loginBtn", "button:has-text('Log in')", "button:has-text('Login')", "button:has-text('Sign in')"]
+  },
+  "search": {
+    "input": ["input[placeholder*='AWB' i]", "input[placeholder*='search' i]", "input[name*='awb' i]", "input[id*='awb' i]", "input[name*='search' i]", "#txtSearch", "input[type='search']"],
+    "submit": ["button:has-text('Search')", "input[type='submit'][value*='Search' i]", "#btnSearch", "button[type='submit']"]
+  },
+  "results": {
+    "row": ["tr:has-text('{MAWB}')", "td:has-text('{MAWB}')", "a:has-text('{MAWB}')", "div:has-text('{MAWB}')"]
+  },
+  "status": {
+    "panel": ["text=/e-?awb/i", "text=/fwb/i", "text=/transmi/i", "[id*='eawb' i]", "[class*='eawb' i]", "[id*='fwb' i]"]
+  }
+}
