@@ -1,0 +1,3752 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "query"
+            },
+            {
+              "name": "route"
+            },
+            {
+              "name": "requires_planner",
+              "type": "boolean"
+            },
+            {
+              "name": "requires_tool",
+              "type": "boolean"
+            },
+            {
+              "name": "session_id"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -12640,
+        56512
+      ],
+      "id": "6216b366-d5b0-43d1-b7e2-1263431426cf",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "const headers = $json.headers || {};\nconst body = $json.body || {};\nconst provided = headers['x-momi-secret'] || headers['X-Momi-Secret'] || body.secret || '';\n\nlet expected = 'momi-change-me';\ntry {\n  if (typeof $env !== 'undefined' && $env && $env.MOMI_APPROVAL_SECRET) {\n    expected = $env.MOMI_APPROVAL_SECRET;\n  }\n} catch (error) {}\n\nif (String(provided) !== String(expected)) {\n  throw new Error('Approval rejected: missing or wrong secret. Send header \"x-momi-secret\" with the approval request.');\n}\n\nreturn [{ json: $json }];"
+      },
+      "id": "27eee7b6-19be-4197-9abd-cbf1a1ad46f5",
+      "name": "Verify Approval Secret",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -13088,
+        55392
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input=$input.first()?.json??{};const chatInput=String(input.chatInput??input.query??input.text??input.message??input.prompt??'').trim();const requestId=input.request_id??`MOMI-${Date.now()}`;const user=input.user&&typeof input.user==='object'?input.user:{id:input.user_id??input.aad_oid??'anonymous',name:input.user_name??input.from_name??'',email:input.user_email??''};const channel=input.channel&&typeof input.channel==='object'?input.channel:{conversation_id:input.conversation_id??input.session_id??null,reply_to_id:input.reply_to_id??null,team_id:input.team_id??null,channel_id:input.channel_id??null};const sessionId=input.session_id??channel.conversation_id??'new_session';return[{json:{...input,request_id:requestId,session_id:sessionId,user,channel,user_id:user.id,conversation_id:channel.conversation_id,reply_to_id:channel.reply_to_id,chatInput,query:chatInput,original_request:chatInput,original_query:chatInput,request_type:'user_request',normalized:true,input_valid:Boolean(chatInput),normalized_at:new Date().toISOString()}}];"
+      },
+      "id": "fdc679c6-e617-4108-8d0c-2a0d4530b3b4",
+      "name": "Normalize Start Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -12416,
+        56512
+      ],
+      "notes": "V4: safe input normalization; never throws on empty manual execution."
+    },
+    {
+      "parameters": {
+        "jsCode": "const input=$input.first()?.json??{};const query=String(input.query??input.original_query??input.chatInput??'').trim();return[{json:{...input,original_query:query,route:input.route??'ACTION',requires_planner:input.requires_planner??true,requires_tool:input.requires_tool??true,session_id:input.session_id??'new_session',experience_search_enabled:Boolean(query)}}];"
+      },
+      "id": "fe8324e3-11f1-450e-9d85-eb5d5a5ea623",
+      "name": "Prepare Experience Search",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -11296,
+        56224
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  model: 'qwen2.5:7b-instruct',\n  stream: false,\n  format: 'json',\n  keep_alive: '30m', options: { temperature: 0, num_ctx: 4096, num_predict: 256 },\n  messages: [\n    {\n      role: 'system',\n      content: 'You are MOMI Experience Search Query Builder. Convert the user task into a concise semantic search query for Qdrant. Return ONLY valid JSON with keys query (string) and filters.task_type (string). Never ask the user a question. Example: query is create an Excel spreadsheet with two columns, filters.task_type is excel_creation.'\n    },\n    {\n      role: 'user',\n      content: $json.original_query || $json.query || ''\n    }\n  ]\n} }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "f64ca0b9-d7e9-4c7c-aee6-f780a41d0533",
+      "name": "Build Experience Search Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -11072,
+        56224
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst start = $('Normalize Start Request').first().json;\nconst originalQuery = start.query ?? start.task ?? start.original_query ?? input.query ?? '';\n\nlet content = input.message?.content ?? input.content ?? input.response ?? input.output ?? '';\nif (typeof content !== 'string') content = JSON.stringify(content);\ncontent = String(content).trim();\n\nlet parsed = null;\n\nif (content) {\n  const cleaned = content\n    .replace(/^\\uFEFF/, '')\n    .replace(/^```json\\s*/i, '')\n    .replace(/^```\\s*/i, '')\n    .replace(/\\s*```$/i, '')\n    .trim();\n\n  const firstBrace = cleaned.indexOf('{');\n  const lastBrace = cleaned.lastIndexOf('}');\n\n  if (firstBrace !== -1 && lastBrace > firstBrace) {\n    let jsonText = cleaned.slice(firstBrace, lastBrace + 1);\n    try {\n      parsed = JSON.parse(jsonText);\n    } catch (error) {\n      try {\n        jsonText = jsonText.replace(/,\\s*}/g, '}').replace(/,\\s*]/g, ']');\n        parsed = JSON.parse(jsonText);\n      } catch (error2) {\n        parsed = null;\n      }\n    }\n  }\n}\n\n// Soft-fail: unusable LLM output -> fall back to the raw user query as the search query.\nif (!parsed || typeof parsed !== 'object' || typeof parsed.query !== 'string' || !parsed.query.trim()) {\n  parsed = { query: String(originalQuery || '').trim(), filters: {} };\n}\n\nif (!String(originalQuery || '').trim()) {\n  throw new Error('MOMI Experience Query Parser: original user query is missing.');\n}\n\nreturn [{\n  json: {\n    ...start,\n    original_query: String(originalQuery).trim(),\n    experience_search_query: parsed.query.trim(),\n    experience_filters: parsed.filters && typeof parsed.filters === 'object' ? parsed.filters : {},\n    task_type: parsed.filters?.task_type ?? null,\n    route: start.route ?? 'ACTION',\n    requires_planner: Boolean(start.requires_planner ?? true),\n    requires_tool: Boolean(start.requires_tool ?? true),\n    session_id: start.session_id ?? 'new_session'\n  }\n}];"
+      },
+      "id": "11551c8f-60a8-401c-91f6-1507658cf81c",
+      "name": "Parse Experience Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10848,
+        56224
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://qdrant:6333/collections/MOMI_EXPERIENCE/points/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({vector:$json.embedding||$json.embeddings?.[0]||[],limit:5,with_payload:true,score_threshold:0.45}) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "a39f5526-dcb7-422e-91b1-3de6f66d029c",
+      "name": "Qdrant - Search MOMI_experience",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -10400,
+        56224
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "V4 real semantic search; failure is non-fatal and yields zero experiences."
+    },
+    {
+      "parameters": {
+        "jsCode": "const q=$input.first()?.json??{};const parsed=$('Parse Experience Query').first()?.json??{};const start=$('Normalize Start Request').first()?.json??parsed;const rows=Array.isArray(q.result)?q.result:(Array.isArray(q.results)?q.results:[]);const experiences=rows.map((r,i)=>({score:r.score??null,...(r.payload||{}),_rank:i+1}));const query=String(start.query??parsed.original_query??parsed.query??'').trim();return[{json:{...start,query,task:query,original_query:query,route:start.route??'ACTION',requires_planner:start.requires_planner??true,requires_tool:start.requires_tool??true,session_id:start.session_id??'new_session',experience_search_query:parsed.experience_search_query??'',experience_filters:parsed.experience_filters??{},task_type:parsed.task_type??null,experiences,experience_search_status:q.status==='error'?'unavailable':'completed'}}];"
+      },
+      "id": "bbe28f50-3a27-4da7-8e6f-2807b7243831",
+      "name": "Build Planner Experience Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10176,
+        56224
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst start = $('Normalize Start Request').first().json;\nconst query = input.query ?? input.original_query ?? input.task ?? '';\n\nif (!query || typeof query !== 'string' || !query.trim()) {\n  throw new Error(`Inject Experience: user query is missing.`);\n}\n\nconst experience = input.experiences ?? input.experience_context ?? input.experience ?? [];\nconst experienceContext = typeof experience === 'string' ? experience : JSON.stringify(experience);\n\nreturn [{\n  json: {\n    ...input,\n    request_id: start.request_id,\n    session_id: start.session_id ?? input.session_id ?? 'new_session',\n    chatInput: start.chatInput ?? query.trim(),\n    query: query.trim(),\n    original_query: query.trim(),\n    route: input.route ?? 'ACTION',\n    requires_planning: input.requires_planning ?? input.requires_planner ?? true,\n    requires_tool: input.requires_tool ?? true,\n    experience_context: experienceContext,\n    planner_instruction:\n      `Use the following past MOMI experiences as optional starting points. ` +\n      `Reuse successful procedures when relevant, but verify current conditions ` +\n      `and adapt when necessary. Never blindly execute an old workflow.\\n\\n` +\n      `PAST EXPERIENCES:\\n${experienceContext}`\n  }\n}];"
+      },
+      "id": "ecbedb34-e50a-4313-bb63-c38ff4957482",
+      "name": "Inject Experience Into Planner",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9952,
+        56224
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "43e47785-4966-4e8c-8823-2307b35eaf01",
+              "name": "query",
+              "value": "={{ $json.query || $json.original_query || $json.task }}",
+              "type": "string"
+            },
+            {
+              "id": "43e47785-4966-4e8c-8823-2307b35eaf02",
+              "name": "original_query",
+              "value": "={{ $json.original_query || $json.query }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -9728,
+        56224
+      ],
+      "id": "674a7a6f-2e42-46f5-b026-f999b97f7174",
+      "name": "Preserve Original Request"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  model: 'qwen2.5:7b-instruct',\n  stream: false,\n  format: 'json',\n  keep_alive: '30m', options: { temperature: 0, num_ctx: 4096, num_predict: 256 },\n  messages: [\n    {\n      role: 'system',\n      content: `You are MOMI Router.\n\nClassify the user's request.\n\nReturn ONLY valid JSON. No markdown. No explanation.\n\nSchema:\n{\n  \"intent\": \"simple|action|information|memory|document|web\",\n  \"route\": \"SIMPLE|ACTION|MEMORY|DOCUMENT|WEB\",\n  \"requires_planning\": true,\n  \"requires_tool\": true,\n  \"reason\": \"short explanation\"\n}\n\nRules:\n\nSIMPLE:\nDirect questions that require no external action.\nrequires_planning=false\nrequires_tool=false\n\nACTION:\nThe user wants MOMI to perform something.\nACTION requires_tool=true.\nSet requires_planning=true when the action requires an external tool, file creation/modification, multiple execution steps, or verification.\nCreating an Excel, Word, PDF, or PowerPoint file ALWAYS requires requires_planning=true and requires_tool=true.\nThe Router does NOT execute the action and must never claim that the action was completed.`\n    },\n    {\n      role: 'user',\n      content: $json.original_query || $json.query || ''\n    }\n  ]\n} }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "f9a1e7cd-462b-460a-a2fb-fd4c8460c0e9",
+      "name": "MOMI Router",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -11968,
+        56320
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const original=$('Normalize Start Request').first()?.json??{};const raw=$input.first()?.json?.message?.content??$input.first()?.json?.response??'';let parsed={intent:'unknown',route:'ACTION',requires_planning:true,requires_tool:true,reason:'Router fallback'};try{const t=String(raw).replace(/```json/gi,'').replace(/```/g,'').trim();const a=t.indexOf('{'),b=t.lastIndexOf('}');if(a>=0&&b>a)parsed={...parsed,...JSON.parse(t.slice(a,b+1))}}catch(e){}const query=String(original.query??original.original_query??'').trim();return[{json:{...original,query,original_query:query,intent:parsed.intent??'unknown',route:parsed.route??'ACTION',requires_planning:parsed.requires_planning===true,requires_tool:parsed.requires_tool===true,reason:parsed.reason??'',raw_llm_output:raw}}];"
+      },
+      "id": "2c3611a9-b346-4d13-b6df-3a9350fa79b6",
+      "name": "Parse Router1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -11744,
+        56320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.requires_planning }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8e40171d-9435-4ff8-86a6-45d854450304",
+      "name": "Requires Planning?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -11520,
+        56320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.use_llm_planner === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ff98aed8-4900-4995-8fbf-33011a3249e6",
+      "name": "Use LLM Planner?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -9280,
+        56224
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'qwen2.5:7b-instruct', stream: false, keep_alive: '30m', options: { temperature: 0, num_ctx: 4096, num_predict: 512 }, messages: [\n  { role: 'system', content: 'Answer the user directly. Do not invent current information or claim external actions.' },\n  { role: 'user', content: $json.chatInput || $json.query || '' }\n] } }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "d56e488c-d890-4d24-a45f-1582af2f8eec",
+      "name": "Direct Route",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -11296,
+        56416
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { status: 'completed', response: $json.message?.content ?? $json.response ?? '' } }];"
+      },
+      "id": "b030e2ac-017d-4db0-bfbc-f81d118d5c25",
+      "name": "Direct Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -11072,
+        56416
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input=$json;if(!input.plan||!Array.isArray(input.plan.steps)||!input.plan.steps.length)return[{json:{...input,final_status:'PLANNER_FAILED',success:false,message:'MOMI could not produce a valid execution plan.',state:{execution_status:'failed',status:'failed',needs_replan:false,all_steps_completed:false,results:{}}}}];const steps=input.plan.steps.map((s,i)=>({...s,id:String(s.id??`step_${i+1}`),parameters:s.parameters&&typeof s.parameters==='object'&&!Array.isArray(s.parameters)?s.parameters:{},depends_on:Array.isArray(s.depends_on)?s.depends_on.map(String):[],completed:false,failed:false,retry_count:0,result:null,summary:null,error:null}));return[{json:{...input,request_id:input.request_id??`MOMI-${Date.now()}`,session_id:input.session_id??'new_session',query:input.query??input.original_query??'',original_query:input.original_query??input.query??'',chatInput:input.chatInput??input.query??'',plan:{goal:input.plan.goal??input.query??'',steps},state:{execution_status:'ready',current_step:null,next_step:null,all_steps_completed:false,needs_replan:false,waiting_for_approval:false,retry_count:0,approval_history:[],results:{},status:'ready'},tool_result:null,verification:null}}];"
+      },
+      "id": "cb722bd9-c0fe-4cf4-8c2e-79f0ed46aaba",
+      "name": "Validate & Build State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8384,
+        56224
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function paired(name) {\n  try { return $(name).item.json; } catch (error) {}\n  try {\n    const all = $(name).all();\n    if (all && all.length) return all[all.length - 1].json;\n  } catch (error) {}\n  try { return $(name).last().json; } catch (error) {}\n  try { return $(name).first().json; } catch (error) {}\n  return null;\n}\n\nfunction stashEnvelope(env) {\n  try {\n    const store = $getWorkflowStaticData('global');\n    store.momi = store.momi || {};\n    if (env && ($execution?.id || env.request_id)) {\n      store.momi[$execution.id || env.request_id] = env;\n    }\n  } catch (error) {}\n}\n\nfunction unstashEnvelope() {\n  try {\n    const store = $getWorkflowStaticData('global');\n    if ($execution?.id && store.momi?.[$execution.id]) return store.momi[$execution.id];\n    const keys = Object.keys(store.momi || {});\n    return keys.length ? store.momi[keys[keys.length - 1]] : null;\n  } catch (error) {\n    return null;\n  }\n}\n\nfunction envelopeFromItems(items) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  const withPlan = list.filter(j => Array.isArray(j.plan?.steps));\n  if (withPlan.length) return withPlan[0];\n  return unstashEnvelope();\n}\n\nfunction otherFromItems(items, env) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  return list.find(j => j !== env) || list[list.length - 1] || {};\n}\n\nconst env = $json;\nconst steps = env.plan?.steps;\n\nif (!Array.isArray(steps)) {\n  throw new Error('MOMI: steps array is missing');\n}\n\n/*MOMI-PATCH:P3a.0*/const completedIds = new Set(\n  steps.filter(step => step.completed === true).map(step => String(step.id))\n);\n\n// An optional step (e.g. the Pelicargo lookup that only feeds \"DO Ref No.\") must\n// never block the run: once it has exhausted its retries, treat it as satisfied\n// so downstream steps (EFC Domestic Billing) can still execute.\nconst skippedOptionalIds = new Set(\n  steps\n    .filter(step => step.failed === true && step.optional === true)\n    .map(step => String(step.id))\n);\nconst satisfiedIds = new Set([...completedIds, ...skippedOptionalIds]);\n\nconst nextStep = steps.find(step => {\n  if (step.completed === true) return false;\n  if (step.failed === true) return false;\n  const dependencies = Array.isArray(step.depends_on) ? step.depends_on : [];\n  return dependencies.every(dep => satisfiedIds.has(String(dep)));\n});\n\nconst allCompleted = steps.length > 0 && steps.every(step => step.completed === true || skippedOptionalIds.has(String(step.id)));\n\nlet execution_status = 'ready';\nlet forceTerminal = false;\nlet termReason = null;\nlet current_step = null;\nlet next_step = null;\nlet all_steps_completed = false;\n\nif (allCompleted) {\n  execution_status = 'completed';\n  all_steps_completed = true;\n} else if (!nextStep) {\n  const failedStep = steps.find(step => step.failed === true && step.optional !== true);\n  if (failedStep) {\n    execution_status = 'failed';\n    current_step = failedStep.id;\n  } else {\n    const blockedNow = steps.filter(s => s.completed !== true && (Array.isArray(s.depends_on) ? s.depends_on : []).some(d => !satisfiedIds.has(String(d))));\n    // Terminal, not a throw: a recovery already produced this shape once — rolling the\n    // replan dice again cannot fix a malformed plan. Route to the terminal report.\n    forceTerminal = true;\n    if (blockedNow.length) {\n      const hangIds = blockedNow.map(s => s.id).join(', ');\n      const missingDeps = [...new Set(blockedNow.flatMap(s => (Array.isArray(s.depends_on) ? s.depends_on : []).map(String).filter(d => !completedIds.has(d))))].join(', ');\n      termReason = `Plan has steps with unmet dependencies (${hangIds} need: ${missingDeps}). The (re)plan is malformed — fix the request or plan and re-run.`;\n      execution_status = 'failed';\n      current_step = blockedNow[0].id;\n    } else {\n      forceTerminal = true;\n      termReason = 'MOMI: No ready step found. Check step dependencies for a cycle.';\n      execution_status = 'failed';\n    }\n  }\n} else {\n  execution_status = 'ready';\n  current_step = nextStep.id;\n  next_step = nextStep;\n}\n\nconst out = {\n    ...env,\n    plan: { ...env.plan, steps },\n    state: {\n      ...(env.state || {}),\n      execution_status,\n      current_step,\n      next_step,\n      all_steps_completed,\n      needs_replan: execution_status === 'failed' ? (forceTerminal ? false : (env.state?.needs_replan !== false)) : false,\n      status: execution_status,\n      failure_reason: forceTerminal ? termReason : (env.state?.failure_reason ?? null),\n      skipped_optional_steps: [...skippedOptionalIds]\n    }\n  };\n  stashEnvelope(out);\n  return [{ json: out }];"
+      },
+      "id": "0424f8ec-a7a9-4906-a314-2618ccb122e3",
+      "name": "Find Next Ready Step1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8160,
+        54256
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function paired(name) {\n  try { return $(name).item.json; } catch (error) {}\n  try {\n    const all = $(name).all();\n    if (all && all.length) return all[all.length - 1].json;\n  } catch (error) {}\n  try { return $(name).last().json; } catch (error) {}\n  try { return $(name).first().json; } catch (error) {}\n  return null;\n}\n\nfunction stashEnvelope(env) {\n  try {\n    const store = $getWorkflowStaticData('global');\n    store.momi = store.momi || {};\n    if (env && ($execution?.id || env.request_id)) {\n      store.momi[$execution.id || env.request_id] = env;\n    }\n  } catch (error) {}\n}\n\nfunction unstashEnvelope() {\n  try {\n    const store = $getWorkflowStaticData('global');\n    if ($execution?.id && store.momi?.[$execution.id]) return store.momi[$execution.id];\n    const keys = Object.keys(store.momi || {});\n    return keys.length ? store.momi[keys[keys.length - 1]] : null;\n  } catch (error) {\n    return null;\n  }\n}\n\nfunction envelopeFromItems(items) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  const withPlan = list.filter(j => Array.isArray(j.plan?.steps));\n  if (withPlan.length) return withPlan[0];\n  return unstashEnvelope();\n}\n\nfunction otherFromItems(items, env) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  return list.find(j => j !== env) || list[list.length - 1] || {};\n}\n\n\nstashEnvelope($json);\nreturn [{ json: $json }];"
+      },
+      "id": "c00736f3-9747-4b60-98d4-6d0590da930e",
+      "name": "Hold Envelope Before Risk",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -7408,
+        54624
+      ],
+      "notes": "Splits to Merge + Risk so the envelope survives Execute Workflow."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "TYFEKt1eJXrS0FQ9",
+          "mode": "list",
+          "cachedResultName": "MOMI - Risk & Permission",
+          "cachedResultUrl": "/workflow/TYFEKt1eJXrS0FQ9"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "envelope": "={{ $json }}",
+            "request_id": "={{ $json.request_id }}",
+            "session_id": "={{ $json.session_id }}",
+            "query": "={{ $json.query }}",
+            "plan": "={{ $json.plan }}",
+            "state": "={{ $json.state }}",
+            "next_step": "={{ $json.state.next_step }}",
+            "tool_result": "={{ $json.tool_result }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "envelope",
+              "displayName": "envelope",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            },
+            {
+              "id": "request_id",
+              "displayName": "request_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "session_id",
+              "displayName": "session_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "plan",
+              "displayName": "plan",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            },
+            {
+              "id": "next_step",
+              "displayName": "next_step",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            },
+            {
+              "id": "tool_result",
+              "displayName": "tool_result",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        -7488,
+        55216
+      ],
+      "name": "Call Risk & Permission",
+      "id": "461a1328-c057-4bab-8c71-298e9cd628be",
+      "onError": "continueRegularOutput",
+      "notes": "Sub-workflow MUST return the MOMI envelope plus tool_result {success, data, summary}. Parent restores the envelope if it does not."
+    },
+    {
+      "parameters": {},
+      "id": "32ef9b35-bc7d-4ded-99f3-9915a8770c32",
+      "name": "Merge Risk Inputs",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -7264,
+        55152
+      ],
+      "notes": "Keeps the envelope item and the HTTP/subworkflow item so Restore does not need $()."
+    },
+    {
+      "parameters": {
+        "jsCode": "function paired(name) {\n  try { return $(name).item.json; } catch (error) {}\n  try {\n    const all = $(name).all();\n    if (all && all.length) return all[all.length - 1].json;\n  } catch (error) {}\n  try { return $(name).last().json; } catch (error) {}\n  try { return $(name).first().json; } catch (error) {}\n  return null;\n}\n\nfunction stashEnvelope(env) {\n  try {\n    const store = $getWorkflowStaticData('global');\n    store.momi = store.momi || {};\n    if (env && ($execution?.id || env.request_id)) {\n      store.momi[$execution.id || env.request_id] = env;\n    }\n  } catch (error) {}\n}\n\nfunction unstashEnvelope() {\n  try {\n    const store = $getWorkflowStaticData('global');\n    if ($execution?.id && store.momi?.[$execution.id]) return store.momi[$execution.id];\n    const keys = Object.keys(store.momi || {});\n    return keys.length ? store.momi[keys[keys.length - 1]] : null;\n  } catch (error) {\n    return null;\n  }\n}\n\nfunction envelopeFromItems(items) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  const withPlan = list.filter(j => Array.isArray(j.plan?.steps));\n  if (withPlan.length) return withPlan[0];\n  return unstashEnvelope();\n}\n\nfunction otherFromItems(items, env) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  return list.find(j => j !== env) || list[list.length - 1] || {};\n}\n\n\nconst items = $input.all();\nconst env = envelopeFromItems(items) || paired('Find Next Ready Step1') || paired('Hold Envelope Before Risk');\nif (!env?.plan) {\n  const keys = items.map(i => Object.keys(i.json || {})).join(' | ');\n  throw new Error('Restore After Risk: envelope missing. Incoming keys: ' + keys);\n}\n\nconst risk = otherFromItems(items, env) || {};\nconst next = env.state?.next_step ? { ...env.state.next_step } : null;\nif (next && (next.tool === 'efc_domestic_billing' || next.parameters?.operation === 'DOMESTIC_BILLING')) {\n  next.requires_approval = true;\n}\nif (next && (risk.requires_approval === true || risk.force_approval === true)) {\n  next.requires_approval = true;\n}\n\nconst steps = next\n  ? env.plan.steps.map(s => s.id === next.id ? { ...s, requires_approval: next.requires_approval } : s)\n  : env.plan.steps;\n\nconst out = {\n  ...env,\n  plan: { ...env.plan, steps },\n  state: { ...env.state, next_step: next },\n  risk\n};\nstashEnvelope(out);\nreturn [{ json: out }];"
+      },
+      "id": "66186d88-9d76-4fc4-9660-6a25627f0037",
+      "name": "Restore After Risk",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -7040,
+        55152
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.state.next_step.requires_approval === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "33c3f90b-591c-4ec0-8b42-487d83af44f9",
+      "name": "Approval Required?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -6816,
+        55680
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const token = `${$json.request_id}:${$json.state?.next_step?.id}`;\nconst store = $getWorkflowStaticData('global');\nstore.pending = store.pending || {};\n// Save the envelope AS WAITING: Resume Approved Step requires the waiting flags,\n// but Persist runs BEFORE the WAITING node sets them. Without this, every APPROVE\n// fails with 'No approval is pending'.\nconst waiting = {\n  ...$json,\n  state: { ...($json.state || {}), waiting_for_approval: true, execution_status: 'waiting_for_approval' }\n};\nstore.pending[token] = waiting;\n\nreturn [{\n  json: {\n    ...waiting,\n    persistence: {\n      status: 'workflow_static_data',\n      backend: 'n8n $getWorkflowStaticData — NOT production. Replace with Redis/Postgres.',\n      request_id: $json.request_id,\n      approval_token: token\n    }\n  }\n}];\n"
+      },
+      "id": "e1e4cbeb-1320-4feb-9d6c-066bfa570f82",
+      "name": "Persist Approval State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -6592,
+        55680
+      ],
+      "notes": "Demo-only store. Replace with Redis/Postgres/Data Store."
+    },
+    {
+      "parameters": {
+        "jsCode": "const next = $json.state?.next_step;\nconst state = {\n  ...$json.state,\n  status: 'waiting_for_approval',\n  waiting_for_approval: true,\n  execution_status: 'waiting_for_approval'\n};\nconst token = `${$json.request_id}:${next?.id}`;\n\nreturn [{\n  json: {\n    request_id: $json.request_id,\n    session_id: $json.session_id,\n    user: $json.user,\n    channel: $json.channel,\n    status: 'waiting_for_approval',\n    approval_required: true,\n    approval_token: token,\n    resume_endpoint: '/webhook/momi/approve',\n    message: `Approval required for step ${next?.id}: ${next?.description || next?.action}`,\n    output: `I need approval before I do this: ${next?.description || next?.action}. Token: ${token}`,\n    teams_card: {\n      type: 'approval',\n      title: 'MOMI needs approval',\n      body: next?.description || next?.action,\n      token,\n      conversation_id: $json.channel?.conversation_id,\n      reply_to_id: $json.channel?.reply_to_id\n    },\n    approval_card: {\n      channel: 'neutral',\n      type: 'approval',\n      title: 'MOMI needs approval',\n      body: next?.description || next?.action,\n      token,\n      conversation_id: $json.channel?.conversation_id,\n      reply_to_id: $json.channel?.reply_to_id\n    },\n    plan: $json.plan,\n    state\n  }\n}];"
+      },
+      "id": "7dc6dfc7-fe36-4995-9ae3-5e2b7d65e7fd",
+      "name": "WAITING - APPROVAL REQUIRED",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -6368,
+        55680
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function paired(name) {\n  try { return $(name).item.json; } catch (error) {}\n  try {\n    const all = $(name).all();\n    if (all && all.length) return all[all.length - 1].json;\n  } catch (error) {}\n  try { return $(name).last().json; } catch (error) {}\n  try { return $(name).first().json; } catch (error) {}\n  return null;\n}\n\nfunction stashEnvelope(env) {\n  try {\n    const store = $getWorkflowStaticData('global');\n    store.momi = store.momi || {};\n    if (env && ($execution?.id || env.request_id)) {\n      store.momi[$execution.id || env.request_id] = env;\n    }\n  } catch (error) {}\n}\n\nfunction unstashEnvelope() {\n  try {\n    const store = $getWorkflowStaticData('global');\n    if ($execution?.id && store.momi?.[$execution.id]) return store.momi[$execution.id];\n    const keys = Object.keys(store.momi || {});\n    return keys.length ? store.momi[keys[keys.length - 1]] : null;\n  } catch (error) {\n    return null;\n  }\n}\n\nfunction envelopeFromItems(items) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  const withPlan = list.filter(j => Array.isArray(j.plan?.steps));\n  if (withPlan.length) return withPlan[0];\n  return unstashEnvelope();\n}\n\nfunction otherFromItems(items, env) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  return list.find(j => j !== env) || list[list.length - 1] || {};\n}\n\n\nstashEnvelope($json);\nreturn [{ json: $json }];"
+      },
+      "id": "8a2b6438-a642-4753-8c38-16dce7228106",
+      "name": "Hold Envelope For Step",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -11968,
+        55296
+      ],
+      "notes": "Pass-through so Restore After Tool Verify can pair the envelope in the loop."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.next_step.tool_family }}",
+                    "rightValue": "memory",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "fam-memory"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "memory"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.next_step.tool_family }}",
+                    "rightValue": "documents",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "fam-documents"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "documents"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.next_step.tool_family }}",
+                    "rightValue": "web",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "fam-web"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "web"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.next_step.tool_family }}",
+                    "rightValue": "clickup",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "fam-clickup"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "clickup"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.next_step.tool_family }}",
+                    "rightValue": "email",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "fam-email"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "email"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.next_step.tool_family }}",
+                    "rightValue": "artifact",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "fam-artifact"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "artifact"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.next_step.tool_family }}",
+                    "rightValue": "computer",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "fam-computer"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "computer"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.next_step.tool_family }}",
+                    "rightValue": "efc",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "fam-efc"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "efc"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.next_step.tool_family }}",
+                    "rightValue": "credential",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "fam-credential"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "credential"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "0f006272-14d1-4857-ab6c-e6024301ec89",
+      "name": "MOMI Tool Router1",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -11520,
+        54416
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const env = $json;\nconst step = env.state?.next_step ?? {};\nreturn [{\n  json: {\n    ...env,\n    tool_result: {\n      success: true,\n      data: {\n        placeholder: true,\n        tool: step.tool,\n        action: step.action,\n        parameters: step.parameters ?? {}\n      },\n      summary: 'PLACEHOLDER: connect existing memory tool for ' + (step.tool || 'memory')\n    }\n  }\n}];"
+      },
+      "id": "54ef7032-a86a-4da0-b36a-00205ab101ca",
+      "name": "EXECUTE MEMORY - CONNECT EXISTING TOOL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9952,
+        53632
+      ],
+      "notes": "Replace with the real memory adapter. Must return envelope + tool_result."
+    },
+    {
+      "parameters": {
+        "jsCode": "const env = $json;\nconst step = env.state?.next_step ?? {};\nreturn [{\n  json: {\n    ...env,\n    tool_result: {\n      success: true,\n      data: {\n        placeholder: true,\n        tool: step.tool,\n        action: step.action,\n        parameters: step.parameters ?? {}\n      },\n      summary: 'PLACEHOLDER: connect existing documents tool for ' + (step.tool || 'documents')\n    }\n  }\n}];"
+      },
+      "id": "dd93a777-cf05-4e52-ab82-3a80312c3f95",
+      "name": "EXECUTE DOCUMENTS - CONNECT EXISTING TOOL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9952,
+        53824
+      ],
+      "notes": "Replace with the real documents adapter. Must return envelope + tool_result."
+    },
+    {
+      "parameters": {
+        "jsCode": "const env = $json;\nconst step = env.state?.next_step ?? {};\nreturn [{\n  json: {\n    ...env,\n    tool_result: {\n      success: true,\n      data: {\n        placeholder: true,\n        tool: step.tool,\n        action: step.action,\n        parameters: step.parameters ?? {}\n      },\n      summary: 'PLACEHOLDER: connect existing clickup tool for ' + (step.tool || 'clickup')\n    }\n  }\n}];"
+      },
+      "id": "1af1c82d-9fea-4c77-bc16-29452030f9bc",
+      "name": "EXECUTE CLICKUP - CONNECT EXISTING TOOL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9952,
+        54016
+      ],
+      "notes": "Replace with the real clickup adapter. Must return envelope + tool_result."
+    },
+    {
+      "parameters": {
+        "jsCode": "const env = $json;\nconst step = env.state?.next_step ?? {};\nconst p = step.parameters || {};\n\nif (step.tool === 'email_send') {\n  return [{ json: { ...env, tool_result: {\n    success: false,\n    data: { sent: false },\n    summary: 'email_send is disabled. MOMI only creates Outlook drafts. Review and send them yourself.',\n    error: 'send_disabled'\n  } } }];\n}\n\nconst results = env.state?.results || {};\nlet jsonPath = p.json_path;\nif (!jsonPath) {\n  for (const v of Object.values(results)) {\n    if (v?.data?.json_path) { jsonPath = v.data.json_path; break; }\n    if (v?.data?.out_json) { jsonPath = v.data.out_json; break; }\n  }\n}\n\nif (jsonPath) {\n  return [{ json: { ...env, tool_result: {\n    success: true,\n    data: {\n      json_path: jsonPath,\n      max_drafts: p.max_drafts || 10,\n      sent: false,\n      next: 'Run workflow MOMI - Contact drafts with this json_path, or keep the Outlook node in that workflow attached.'\n    },\n    summary: `Contacts file ready (${jsonPath}). Create Outlook drafts with the Contact drafts workflow. Nothing was sent.`\n  } } }];\n}\n\nreturn [{ json: { ...env, tool_result: {\n  success: true,\n  data: { placeholder: true, tool: step.tool, action: step.action, parameters: p },\n  summary: 'PLACEHOLDER: connect Outlook draft adapter. Nothing was sent.'\n} } }];"
+      },
+      "id": "71f3c0ed-5745-477f-966c-35ffffde5293",
+      "name": "EXECUTE EMAIL - CONNECT EXISTING TOOL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9952,
+        54208
+      ],
+      "notes": "Drafts only. Never send. json_path comes from the scrape step."
+    },
+    {
+      "parameters": {
+        "jsCode": "const env = $json;\nconst step = env.state?.next_step ?? {};\nconst results = env.state?.results || {};\nlet xlsx = step.parameters?.path;\nlet jsonPath = null;\nfor (const v of Object.values(results)) {\n  if (v?.data?.xlsx) xlsx = xlsx || v.data.xlsx;\n  if (v?.data?.json_path) jsonPath = v.data.json_path;\n}\nif (xlsx || jsonPath) {\n  return [{ json: { ...env, tool_result: {\n    success: true,\n    data: { xlsx, json_path: jsonPath, placeholder: false },\n    summary: `Workbook ready: ${xlsx || jsonPath}`\n  } } }];\n}\nreturn [{ json: { ...env, tool_result: {\n  success: true,\n  data: { placeholder: true, tool: step.tool, parameters: step.parameters || {} },\n  summary: 'PLACEHOLDER: no contacts workbook on this run.'\n} } }];"
+      },
+      "id": "c5ebe62b-c31e-4916-a102-ceb32b89b8e8",
+      "name": "Call Artifact",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9952,
+        54496
+      ],
+      "notes": "Uses the xlsx/json produced by the generic scraper."
+    },
+    {
+      "parameters": {
+        "jsCode": "const item=$json;let env=item;try{const h=$('Hold Envelope For Step').first()?.json;if(h?.plan)env=h}catch(e){}if(!env?.plan)return[{json:{...item,tool_result:{success:false,data:null,summary:'Execution envelope was lost.',error:'envelope_missing'}}}];const tr=item.tool_result??{success:item.success===true,data:item.data??null,summary:item.summary??item.message??'',error:item.error??null};return[{json:{...env,tool_result:{success:tr.success===true,data:tr.data??null,summary:tr.summary??'',output:tr.output??'',tool:tr.tool||env.state?.next_step?.tool,action:tr.action||env.state?.next_step?.action,error:tr.error??null}}}];"
+      },
+      "id": "e6dde7b3-ca18-4d18-b477-111a1c1fd834",
+      "name": "Capture Tool Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9728,
+        54256
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "flRRes4pv8oAtBQP",
+          "mode": "list",
+          "cachedResultName": "MOMI - Per Tool Verification",
+          "cachedResultUrl": "/workflow/flRRes4pv8oAtBQP"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "envelope": "={{ $json }}",
+            "request_id": "={{ $json.request_id }}",
+            "session_id": "={{ $json.session_id }}",
+            "query": "={{ $json.query }}",
+            "plan": "={{ $json.plan }}",
+            "state": "={{ $json.state }}",
+            "next_step": "={{ $json.state.next_step }}",
+            "tool_result": "={{ $json.tool_result }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "envelope",
+              "displayName": "envelope",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            },
+            {
+              "id": "request_id",
+              "displayName": "request_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "session_id",
+              "displayName": "session_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "plan",
+              "displayName": "plan",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            },
+            {
+              "id": "next_step",
+              "displayName": "next_step",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            },
+            {
+              "id": "tool_result",
+              "displayName": "tool_result",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        -9504,
+        55744
+      ],
+      "name": "Call MOMI - Per Tool Verification",
+      "id": "3995f910-8787-4ac4-9f9f-9fe151f4ead0",
+      "onError": "continueRegularOutput",
+      "notes": "Sub-workflow MUST return the MOMI envelope plus tool_result {success, data, summary}. Parent restores the envelope if it does not."
+    },
+    {
+      "parameters": {},
+      "id": "12cc7aa6-8634-4c20-8805-2bc812272939",
+      "name": "Merge Tool Verify Inputs",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -9280,
+        54256
+      ],
+      "notes": "Keeps the envelope item and the HTTP/subworkflow item so Restore does not need $()."
+    },
+    {
+      "parameters": {
+        "jsCode": "function paired(name) {\n  try { return $(name).item.json; } catch (error) {}\n  try {\n    const all = $(name).all();\n    if (all && all.length) return all[all.length - 1].json;\n  } catch (error) {}\n  try { return $(name).last().json; } catch (error) {}\n  try { return $(name).first().json; } catch (error) {}\n  return null;\n}\n\nfunction stashEnvelope(env) {\n  try {\n    const store = $getWorkflowStaticData('global');\n    store.momi = store.momi || {};\n    if (env && ($execution?.id || env.request_id)) {\n      store.momi[$execution.id || env.request_id] = env;\n    }\n  } catch (error) {}\n}\n\nfunction unstashEnvelope() {\n  try {\n    const store = $getWorkflowStaticData('global');\n    if ($execution?.id && store.momi?.[$execution.id]) return store.momi[$execution.id];\n    const keys = Object.keys(store.momi || {});\n    return keys.length ? store.momi[keys[keys.length - 1]] : null;\n  } catch (error) {\n    return null;\n  }\n}\n\nfunction envelopeFromItems(items) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  const withPlan = list.filter(j => Array.isArray(j.plan?.steps));\n  if (withPlan.length) return withPlan[0];\n  return unstashEnvelope();\n}\n\nfunction otherFromItems(items, env) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  return list.find(j => j !== env) || list[list.length - 1] || {};\n}\n\n\nconst items = $input.all();\nconst env = envelopeFromItems(items) || paired('Capture Tool Result') || paired('Hold Envelope For Step') || unstashEnvelope();\nconst out = otherFromItems(items, env) || {};\n\nif (!env?.plan) {\n  const keys = items.map(i => Object.keys(i.json || {})).join(' | ');\n  throw new Error('Restore After Tool Verify: envelope missing. Incoming keys: ' + keys);\n}\n\nconst verifySaysFail =\n  out.success === false ||\n  out.verified === false ||\n  out.verification?.verified === false;\n\nconst baseResult = env.tool_result ?? {\n  success: false,\n  data: out,\n  summary: 'Missing tool_result after verification'\n};\n\nconst tool_result = verifySaysFail\n  ? {\n      ...baseResult,\n      success: false,\n      summary: out.verification?.summary || out.message || baseResult.summary,\n      error: out.verification?.issues || out.error || baseResult.error || 'per-tool verification failed'\n    }\n  : baseResult;\n\nconst restored = { ...env, tool_result, per_tool_verification: out };\nstashEnvelope(restored);\nreturn [{ json: restored }];"
+      },
+      "id": "284fce2c-ccf9-4414-8a5b-bbccd17b28d3",
+      "name": "Restore After Tool Verify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9056,
+        54256
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const env=$json,steps=env.plan?.steps||[],sid=String(env.state?.current_step??env.state?.next_step?.id??''),step=steps.find(s=>String(s.id)===sid),tr=env.tool_result||{};\nif(!step)return[{json:{...env,final_status:'EXECUTION_FAILED',success:false,message:`Current step ${sid||'(none)'} was not found.`,state:{...(env.state||{}),execution_status:'failed',status:'failed',needs_replan:false}}}];\n// FAIL FAST on credential lookups: the store is static within a run, so a retry\n// can never succeed, and an LLM replan cannot invent missing secrets. Surface the\n// missing fields immediately instead of burning 20 min on MOMI Re-Planner timeouts.\nconst _isCred=step.tool==='credential_lookup'||step.tool_family==='credential';\nconst _missing=Array.isArray(tr.data?.missing)?tr.data.missing:[];\nconst _partial=tr.data?.partial===true||_missing.length>0;\nconst _credOk=(tr.success===true||tr.status==='success'||tr.status==='completed')&&!_partial;\nif(_isCred&&!_credOk){\n  const _svc=tr.data?.service||step.parameters?.service||'efc';\n  step.failed=true;step.completed=false;step.retry_count=2;\n  step.result=tr.data??null;step.summary=tr.summary??'';\n  step.error=_missing.length?`Incomplete credentials for '${_svc}': missing ${_missing.join(', ')}. Add them to the Credential Store and re-run.`:(tr.data?.not_found===true?`Credential Store has no usable '${_svc}' entry (${tr.summary||tr.error||'not found'}). Fix the store entry or the lookup inputs and re-run.`:(tr.error??tr.summary??'Credential lookup failed'));\n  return[{json:{...env,plan:{...env.plan,steps},message:step.error,tool_result:tr,state:{...(env.state||{}),results:{...((env.state||{}).results||{}),[String(step.id)]:tr},needs_replan:false,execution_status:'failed',status:'failed',failure_reason:step.error}}}];\n}\nconst _code=String(tr.error||'');const _fatal=/service_unreachable|auth_failed/.test(_code);const _hintMap={service_unreachable:'The Playwright/browser service did not answer (HTTP 0 = no response at all). Start it on the host so it listens on the URL passed as playwright_service_url (default http://host.docker.internal:8766), confirm it is reachable from inside the n8n container, then re-run.',auth_failed:'Login was rejected. Fix the stored credentials in the Credential Store and re-run.',timeout:'The browser service timed out. Raise the step timeout or warm up the service and re-run.'};const _hint=_hintMap[_code]||null;/*MOMI-PATCH:P2a.0*/const ok=tr.success===true||tr.status==='success'||tr.status==='completed';\nif(ok){step.completed=true;step.failed=false;step.result=tr.data??null;step.summary=tr.summary??'';step.error=null}\nelse{step.retry_count=_fatal?2:Number(step.retry_count||0)+1;step.result=tr.data??null;step.summary=tr.summary??'';step.error=tr.error??tr.summary??'Tool failed';if(step.retry_count>=2)step.failed=true}\nconst failed=step.failed===true;\n// No-replan: deterministic web-scrape failures are mechanical (login walls, selectors,\n// dead services) — a new plan would issue the same scrape. Fail loudly instead of\n// burning 20 min on Re-Planner timeouts. LLM-made plans may still replan.\nconst _noReplan=((step.tool_family==='web'||step.tool==='pelicargo_resolve_shipment')&&env.use_llm_planner===false)||_fatal;\nconst _capped=(Number(env.state?.replan_count||0)>=2);\nconst _noData=/incomplete/i.test(step.error||'')&&/credential/i.test(step.error||'');\nreturn[{json:{...env,plan:{...env.plan,steps},state:{...(env.state||{}),results:{...((env.state||{}).results||{}),[String(step.id)]:tr},needs_replan:failed&&!_noReplan&&!_capped&&!_noData,execution_status:failed?'failed':'ready',status:failed?'failed':'ready',failure_reason:(failed&&(_noReplan||_capped||_noData))?(_hint||step.error||'Tool failed'):null},tool_result:tr}}];\n"
+      },
+      "id": "c50f2ab9-8862-4aa5-acad-d303d2eab6e7",
+      "name": "Commit Tool Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8832,
+        54256
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.state.needs_replan === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a8b666ee-b871-46b2-86d2-00037085c837",
+      "name": "Re-plan Required?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -8608,
+        54256
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function paired(name) {\n  try { return $(name).item.json; } catch (error) {}\n  try {\n    const all = $(name).all();\n    if (all && all.length) return all[all.length - 1].json;\n  } catch (error) {}\n  try { return $(name).last().json; } catch (error) {}\n  try { return $(name).first().json; } catch (error) {}\n  return null;\n}\n\nfunction stashEnvelope(env) {\n  try {\n    const store = $getWorkflowStaticData('global');\n    store.momi = store.momi || {};\n    if (env && ($execution?.id || env.request_id)) {\n      store.momi[$execution.id || env.request_id] = env;\n    }\n  } catch (error) {}\n}\n\nfunction unstashEnvelope() {\n  try {\n    const store = $getWorkflowStaticData('global');\n    if ($execution?.id && store.momi?.[$execution.id]) return store.momi[$execution.id];\n    const keys = Object.keys(store.momi || {});\n    return keys.length ? store.momi[keys[keys.length - 1]] : null;\n  } catch (error) {\n    return null;\n  }\n}\n\nfunction envelopeFromItems(items) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  const withPlan = list.filter(j => Array.isArray(j.plan?.steps));\n  if (withPlan.length) return withPlan[0];\n  return unstashEnvelope();\n}\n\nfunction otherFromItems(items, env) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  return list.find(j => j !== env) || list[list.length - 1] || {};\n}\n\n\nstashEnvelope($json);\nreturn [{ json: $json }];"
+      },
+      "id": "f673cc99-05ca-4a22-89de-c1d0e6a5073f",
+      "name": "Hold Envelope Before Replan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -7712,
+        55440
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "755ccd16-98de-4f9b-af8d-bf8e137d1eed",
+      "name": "Merge Replan Inputs",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -7264,
+        55440
+      ],
+      "notes": "Keeps the envelope item and the HTTP/subworkflow item so Restore does not need $()."
+    },
+    {
+      "parameters": {
+        "jsCode": "function paired(name) {\n  try { return $(name).item.json; } catch (error) {}\n  try {\n    const all = $(name).all();\n    if (all && all.length) return all[all.length - 1].json;\n  } catch (error) {}\n  try { return $(name).last().json; } catch (error) {}\n  try { return $(name).first().json; } catch (error) {}\n  return null;\n}\n\nfunction stashEnvelope(env) {\n  try {\n    const store = $getWorkflowStaticData('global');\n    store.momi = store.momi || {};\n    if (env && ($execution?.id || env.request_id)) {\n      store.momi[$execution.id || env.request_id] = env;\n    }\n  } catch (error) {}\n}\n\nfunction unstashEnvelope() {\n  try {\n    const store = $getWorkflowStaticData('global');\n    if ($execution?.id && store.momi?.[$execution.id]) return store.momi[$execution.id];\n    const keys = Object.keys(store.momi || {});\n    return keys.length ? store.momi[keys[keys.length - 1]] : null;\n  } catch (error) {\n    return null;\n  }\n}\n\nfunction envelopeFromItems(items) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  const withPlan = list.filter(j => Array.isArray(j.plan?.steps));\n  if (withPlan.length) return withPlan[0];\n  return unstashEnvelope();\n}\n\nfunction otherFromItems(items, env) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  return list.find(j => j !== env) || list[list.length - 1] || {};\n}\n\nfunction familyOf(name) {\n  const n = String(name || '');\n  if (/^clickup_/.test(n)) return 'clickup';\n  if (/^efc_/.test(n)) return 'efc';\n  if (/^credential_/.test(n)) return 'credential';\n  if (/^pelicargo_/.test(n)) return 'web';\n  if (/^(email_|calendar_)/.test(n)) return 'email';\n  if (/^crm_/.test(n)) return 'clickup';\n  if (/^(web_search|browser_)/.test(n)) return 'web';\n  if (/^(qdrant_memory_|qdrant_experience_)/.test(n)) return 'memory';\n  if (/^qdrant_document_/.test(n)) return 'documents';\n  if (/^(pdf_|excel_|powerpoint_|report_|image_|file_write)/.test(n)) return 'artifact';\n  if (/^(windows_|python_execute|file_search|file_read|api_request)/.test(n)) return 'computer';\n  return null;\n}\n\nfunction normalizeStep(s, index, registryByName) {\n  const id = String(s.id ?? s.step_id ?? s.step ?? `step_${index + 1}`);\n  const tool = s.tool;\n  const def = tool ? registryByName.get(tool) : null;\n  const parameters =\n    s.parameters && typeof s.parameters === 'object' && !Array.isArray(s.parameters)\n      ? s.parameters\n      : (s.arguments && typeof s.arguments === 'object' && !Array.isArray(s.arguments)\n        ? s.arguments\n        : {});\n  const depends_on = Array.isArray(s.depends_on)\n    ? [...new Set(s.depends_on.map(String))]\n    : [];\n  const tool_family = s.tool_family || def?.family || familyOf(tool);\n  return {\n    id,\n    description: s.description ?? s.action ?? '',\n    tool: tool ?? null,\n    tool_family,\n    action: s.action ?? def?.description ?? tool ?? '',\n    parameters,\n    depends_on,\n    requires_approval: Boolean(s.requires_approval || def?.requires_approval),\n    completed: s.completed === true,\n    failed: s.failed === true,\n    retry_count: Number(s.retry_count || 0),\n    result: s.result ?? null,\n    summary: s.summary ?? null,\n    error: s.error ?? null\n  };\n}\n\n\nconst items = $input.all();\nconst original = envelopeFromItems(items) || paired('Commit Tool Result') || paired('Find Next Ready Step1') || unstashEnvelope();\nconst llm = otherFromItems(items, original) || $json;\nconst raw = llm.message?.content ?? llm.response ?? $json.message?.content ?? $json.response ?? '';\nconst text = String(raw);\nconst first = text.indexOf('{');\nconst last = text.lastIndexOf('}');\nif (first === -1 || last <= first) {\n  throw new Error('Re-planner did not return JSON');\n}\n\nconst np = JSON.parse(text.slice(first, last + 1));\nif (!Array.isArray(np.steps) || !np.steps.length) {\n  throw new Error('Recovery plan is empty');\n}\n\nif (!original?.plan) {\n  throw new Error('Apply Recovery Plan: original envelope missing');\n}\n\nlet registry = [];\ntry {\n  registry = $('MOMI Tool Registry').first().json.planner_tool_registry ?? [];\n} catch (error) {\n  registry = [];\n}\nconst registryByName = new Map(registry.map(t => [t.name, t]));\n\nconst kept = original.plan.steps.filter(s => s.completed === true);\nconst keptIds = new Set(kept.map(s => String(s.id)));\n\nconst incomingNew = np.steps\n  .map((s, i) => normalizeStep(s, i, registryByName))\n  .filter(s => !keptIds.has(String(s.id)))\n  .map(s => ({ ...s, completed: false, failed: false }));\n\nfor (const s of incomingNew) {\n  if (!s.tool) throw new Error(`Recovery step ${s.id}: tool is missing`);\n  if (registryByName.size && !registryByName.has(s.tool)) {\n    throw new Error(`Recovery plan selected unregistered tool: ${s.tool}`);\n  }\n  if (!s.tool_family) {\n    throw new Error(`Recovery step ${s.id}: tool_family is missing`);\n  }\n}\n\nconst priorReplans = Number(original.state?.replan_count || 0);\nif (priorReplans >= 2) {\n  const _fe = original.plan.steps.find(s => s.failed === true) || {};\n  return [{\n    json: {\n      ...original,\n      state: {\n        ...original.state,\n        execution_status: 'failed',\n        status: 'failed',\n        needs_replan: false,\n        failure_reason: `Re-planning budget exhausted (${priorReplans} recoveries attempted). Last failure: ${_fe.id || 'unknown step'} — ${_fe.error || _fe.summary || 'unknown error'}. Fix the underlying issue and re-run.`\n      },\n      tool_result: null\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    ...original,\n    plan: {\n      goal: np.goal ?? original.plan.goal,\n      steps: [...kept, ...incomingNew]\n    },\n    state: {\n      ...original.state,\n      execution_status: 'ready',\n      current_step: null,\n      next_step: null,\n      all_steps_completed: false,\n      needs_replan: false,\n      waiting_for_approval: false,\n      status: 'executing',\n      replan_count: priorReplans + 1\n    },\n    tool_result: null\n  }\n}];"
+      },
+      "id": "ed9481e8-abf6-4b6d-8879-4e5672a4796c",
+      "name": "Apply Recovery Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -7040,
+        55504
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const env = $json;\nif (!Array.isArray(env.plan?.steps)) {\n  throw new Error(\n    `Persist Execution State: plan.steps is missing. Received: ${JSON.stringify(env).slice(0, 500)}`\n  );\n}\n\nreturn [{\n  json: {\n    ...env,\n    state: {\n      ...env.state,\n      execution_status: env.state?.execution_status ?? 'ready',\n      status: env.state?.status ?? env.state?.execution_status ?? 'ready'\n    }\n  }\n}];"
+      },
+      "id": "b086ba63-c7df-403b-81e7-cb88cb3c82a7",
+      "name": "Persist Execution State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8384,
+        54256
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function paired(name) {\n  try { return $(name).item.json; } catch (error) {}\n  try {\n    const all = $(name).all();\n    if (all && all.length) return all[all.length - 1].json;\n  } catch (error) {}\n  try { return $(name).last().json; } catch (error) {}\n  try { return $(name).first().json; } catch (error) {}\n  return null;\n}\n\nfunction stashEnvelope(env) {\n  try {\n    const store = $getWorkflowStaticData('global');\n    store.momi = store.momi || {};\n    if (env && ($execution?.id || env.request_id)) {\n      store.momi[$execution.id || env.request_id] = env;\n    }\n  } catch (error) {}\n}\n\nfunction unstashEnvelope() {\n  try {\n    const store = $getWorkflowStaticData('global');\n    if ($execution?.id && store.momi?.[$execution.id]) return store.momi[$execution.id];\n    const keys = Object.keys(store.momi || {});\n    return keys.length ? store.momi[keys[keys.length - 1]] : null;\n  } catch (error) {\n    return null;\n  }\n}\n\nfunction envelopeFromItems(items) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  const withPlan = list.filter(j => Array.isArray(j.plan?.steps));\n  if (withPlan.length) return withPlan[0];\n  return unstashEnvelope();\n}\n\nfunction otherFromItems(items, env) {\n  const list = (items || []).map(i => (i && i.json) ? i.json : i).filter(Boolean);\n  return list.find(j => j !== env) || list[list.length - 1] || {};\n}\n\n\nstashEnvelope($json);\nreturn [{ json: $json }];"
+      },
+      "id": "bae287a6-5824-444b-ad04-6adaaa6b3c31",
+      "name": "Hold Envelope Before Verify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -7712,
+        54064
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "bd500691-c834-4c72-a931-9f328a2dfbc6",
+      "name": "Merge Verify Inputs",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -7264,
+        54064
+      ],
+      "notes": "Keeps the envelope item and the HTTP/subworkflow item so Restore does not need $()."
+    },
+    {
+      "parameters": {
+        "jsCode": "function paired(name) {\n  try { return $(name).item.json; } catch (error) {}\n  try {\n    const all = $(name).all();\n    if (all && all.length) return all[all.length - 1].json;\n  } catch (error) {}\n  try { return $(name).last().json; } catch (error) {}\n  try { return $(name).first().json; } catch (error) {}\n  return null;\n}\nfunction unstashEnvelope() {\n  try {\n    const store = $getWorkflowStaticData('global');\n    if ($execution?.id && store.momi?.[$execution.id]) return store.momi[$execution.id];\n    const keys = Object.keys(store.momi || {});\n    return keys.length ? store.momi[keys[keys.length - 1]] : null;\n  } catch (error) { return null; }\n}\nconst items = $input.all().map(i => (i && i.json) ? i.json : i).filter(Boolean);\n// Envelope ladder: merge item -> Hold -> STASH (Hold stashed the final envelope\n// keyed by execution id; immune to merge drops and $() quirks) -> Find Next -> first.\nconst envIn = items.find(j => j && Array.isArray(j.plan?.steps));\nconst holdHit = envIn ? null : paired('Hold Envelope Before Verify');\nconst stashHit = (envIn || holdHit) ? null : unstashEnvelope();\nconst findHit = (envIn || holdHit || stashHit) ? null : paired('Find Next Ready Step1');\nconst env = envIn ?? holdHit ?? stashHit ?? findHit ?? $json;\nconst env_source = envIn ? 'merge-input' : (holdHit ? 'hold' : (stashHit ? 'stash' : (findHit ? 'findnext' : 'input-first')));\n// Verdict: find the LLM item by shape (merge order-proof), not blind .first().\nconst llm = items.find(j => j && j !== envIn && (j.message?.content !== undefined || j.response !== undefined))\n  ?? items.find(j => j && (j.message?.content !== undefined || j.response !== undefined))\n  ?? {};\nconst raw = llm.message?.content ?? llm.response ?? '';\nlet p = { verified: false, issues: ['Verifier did not return valid JSON'], summary: String(raw || '(empty verifier response)').slice(0, 500), evidence: [] };\ntry {\n  const t = String(raw).replace(/```json/gi, '').replace(/```/g, '').trim(), a = t.indexOf('{'), b = t.lastIndexOf('}');\n  if (a >= 0 && b > a) p = { ...p, ...JSON.parse(t.slice(a, b + 1)) };\n} catch (e) {}\nreturn [{ json: { ...env, verification: p, verified: p.verified === true, verification_status: p.verified === true ? 'SUCCESS' : 'FAILED', parse_debug: { env_source, merge_items: items.length, verdict_chars: String(raw).length } } }];"
+      },
+      "id": "8f654978-c8ec-46e3-a2f4-9a2f92e94350",
+      "name": "Parse Goal Verification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -7040,
+        54064
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.verification.verified }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9a4db1fb-6121-48f6-bfde-1fab380bd230",
+      "name": "Verified?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -6816,
+        54064
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nreturn [{\n  json: {\n    ...input,\n    final_status: 'VERIFIED',\n    success: true,\n    message: 'Action completed and verification passed.',\n    verified_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "73bdd6b5-4763-49bf-a727-262050b5efc3",
+      "name": "VERIFIED - Continue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -6368,
+        54064
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst message = String(\n  input.verification?.summary ||\n  input.tool_result?.message ||\n  input.tool_result?.summary ||\n  'Goal verification failed'\n);\nconst status = String(input.verification_status || input.tool_result?.status || 'failed');\n\nlet diagnosis = 'Goal was not verified from execution evidence';\nlet correction = 'Inspect step results and replan remaining work.';\n\nconst lower = message.toLowerCase();\nif (lower.includes('authorization') || lower.includes('unauthorized') || lower.includes('credential')) {\n  diagnosis = 'Authentication or authorization failure';\n  correction = 'Refresh or repair credentials, then retry the operation.';\n} else if (lower.includes('not found') || status === 'not_found') {\n  diagnosis = 'Requested resource was not found';\n  correction = 'Search for the correct resource and retry if appropriate.';\n} else if (lower.includes('timeout') || lower.includes('timed out')) {\n  diagnosis = 'Operation timed out';\n  correction = 'Wait briefly and retry the operation once.';\n} else if (lower.includes('rate limit') || lower.includes('too many requests')) {\n  diagnosis = 'Rate limit encountered';\n  correction = 'Wait and retry after the rate-limit window.';\n}\n\nreturn [{\n  json: {\n    ...input,\n    diagnosis: {\n      status,\n      original_error: message,\n      issues: input.verification?.issues ?? [],\n      diagnosis,\n      correction,\n      diagnosed_at: new Date().toISOString()\n    }\n  }\n}];"
+      },
+      "id": "03e95671-68c5-4142-824e-e4612f8fad5a",
+      "name": "DIAGNOSE Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -6592,
+        54256
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nreturn [{\n  json: {\n    ...input,\n    final_status: 'FAILED_AFTER_VERIFY',\n    success: false,\n    message: 'MOMI could not verify that the goal was achieved.',\n    failure_reason: input.diagnosis?.diagnosis || input.verification?.summary || 'Verification failed',\n    completed_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "1130165f-12bc-4290-9c9a-0a5cc5f466ba",
+      "name": "FAILED - Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -6368,
+        54256
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nreturn [{\n  json: {\n    ...input,\n    momi_verification_result: true,\n    status: input.final_status || 'UNKNOWN',\n    success: input.success === true,\n    retry_count: input.state?.retry_count || 0,\n    verification: input.verification || null,\n    diagnosis: input.diagnosis || null,\n    result: input.tool_result || null,\n    message: input.message || 'MOMI verification workflow completed.',\n    completed_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "07369698-4765-4f2f-8d77-e711c3f9d42f",
+      "name": "MOMI Final Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -6144,
+        54160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.success === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0b4d6e79-23db-40d4-9cc6-545af6c8c2bd",
+      "name": "Save Experience?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -5920,
+        54160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $json;\n\nif (input.success !== true && input.final_status !== 'VERIFIED') {\n  return [];\n}\n\nreturn [{\n  json: {\n    ...input,\n    experience_input: {\n      goal: input.plan?.goal ?? input.query ?? '',\n      task_type: input.task_type ?? 'general',\n      plan: input.plan ?? [],\n      executed_steps: input.plan?.steps ?? [],\n      tools_used: (input.plan?.steps ?? []).map(s => s.tool).filter(Boolean),\n      tool_inputs: (input.plan?.steps ?? []).map(s => ({ id: s.id, parameters: s.parameters })),\n      tool_outputs: input.state?.results ?? {},\n      verification: input.verification ?? {},\n      outcome: 'success'\n    },\n    ollama_chat_url: input.ollama_chat_url ?? 'http://host.docker.internal:11434/api/chat',\n    ollama_embedding_url: input.ollama_embedding_url ?? 'http://host.docker.internal:11434/api/embeddings',\n    ollama_model: input.ollama_model ?? 'qwen3:8b',\n    embedding_model: input.embedding_model ?? 'nomic-embed-text',\n    qdrant_url: input.qdrant_url ?? 'http://qdrant:6333',\n    qdrant_collection: input.qdrant_collection ?? 'MOMI_EXPERIENCE'\n  }\n}];"
+      },
+      "id": "db798921-9b09-43c3-90d5-76f8952f472f",
+      "name": "Normalize Successful Experience",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -5696,
+        54160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ollama_chat_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: $json.ollama_model,\n  stream: false,\n  format: 'json',\n  keep_alive: '30m', options: { temperature: 0, num_ctx: 4096, num_predict: 1024 },\n  messages: [\n    {\n      role: 'system',\n      content: 'You are MOMI Experience Extraction Engine. Convert a successfully completed task into a concise reusable procedure. Store reusable knowledge, not raw API responses. Identify the goal, task type, tools, ordered procedure, verification method, important inputs, reusable pattern, and outcome. Do not invent steps that did not occur. Return ONLY JSON with: title, goal, task_type, tools_used, procedure(array of strings), verification(array of strings), reusable_pattern, outcome.'\n    },\n    { role: 'user', content: JSON.stringify($json.experience_input) }\n  ]\n}) }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "cf43f2f5-8e94-47a2-aa09-624334ad3bfd",
+      "name": "Ollama - Extract Experience",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -5472,
+        54160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const original = $('Normalize Successful Experience').first().json;\nconst raw = $json.message?.content ?? $json.response ?? $json.content ?? '';\n\nlet experience;\ntry {\n  experience = typeof raw === 'string' ? JSON.parse(raw) : raw;\n} catch (error) {\n  throw new Error('Experience extraction returned invalid JSON: ' + error.message);\n}\n\nif (!experience.title || !experience.goal || !Array.isArray(experience.procedure)) {\n  throw new Error('Experience extraction is missing required fields.');\n}\n\nconst experienceText = [\n  'Title: ' + experience.title,\n  'Goal: ' + experience.goal,\n  'Task Type: ' + (experience.task_type ?? ''),\n  'Tools: ' + JSON.stringify(experience.tools_used ?? []),\n  'Procedure: ' + JSON.stringify(experience.procedure ?? []),\n  'Verification: ' + JSON.stringify(experience.verification ?? []),\n  'Reusable Pattern: ' + (experience.reusable_pattern ?? ''),\n  'Outcome: ' + (experience.outcome ?? 'success')\n].join('\\n');\n\nreturn [{ json: { ...original, experience, experience_text: experienceText } }];"
+      },
+      "id": "3135c306-c960-45e8-9a91-e6d1b89b6f70",
+      "name": "Prepare Experience Document",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -5248,
+        54160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ollama_embedding_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.embedding_model, prompt: $json.experience_text }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "ac3daee6-521b-44ec-b569-b7f74e3b0fdf",
+      "name": "Ollama - Create Experience Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -5024,
+        54160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prepared = $('Prepare Experience Document').first().json;\nconst embedding = $json.embedding ?? $json.embeddings?.[0];\n\nif (!Array.isArray(embedding) || embedding.length === 0) {\n  throw new Error('No embedding returned by Ollama.');\n}\n\nreturn [{\n  json: {\n    ...prepared,\n    embedding,\n    point_id: crypto.randomUUID()\n  }\n}];"
+      },
+      "id": "76b90359-94b7-4d99-ada9-72cc816a9601",
+      "name": "Prepare Qdrant Point",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4800,
+        54160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('Prepare Qdrant Point').first().json.qdrant_url }}/collections/{{ $('Prepare Qdrant Point').first().json.qdrant_collection }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ vectors: { size: $('Prepare Qdrant Point').first().json.embedding.length, distance: 'Cosine' } }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "658b3a7f-8ff3-4e79-960f-0112208c6448",
+      "name": "Ensure MOMI_EXPERIENCE Collection",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -4576,
+        54160
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('Prepare Qdrant Point').first().json.qdrant_url }}/collections/{{ $('Prepare Qdrant Point').first().json.qdrant_collection }}/points?wait=true",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => {\n  const p = $('Prepare Qdrant Point').first().json;\n  return JSON.stringify({\n    points: [{\n      id: p.point_id,\n      vector: p.embedding,\n      payload: {\n        type: 'successful_experience',\n        title: p.experience.title,\n        goal: p.experience.goal,\n        task_type: p.experience.task_type,\n        tools_used: p.experience.tools_used,\n        procedure: p.experience.procedure,\n        verification: p.experience.verification,\n        reusable_pattern: p.experience.reusable_pattern,\n        outcome: 'success',\n        experience_text: p.experience_text,\n        created_at: new Date().toISOString()\n      }\n    }]\n  });\n})() }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "6641cc72-f88c-4b9f-8d6d-b4df27202e59",
+      "name": "Write Experience to Qdrant",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -4352,
+        54160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    experience_saved: true,\n    collection: $('Normalize Successful Experience').first().json.qdrant_collection,\n    point_id: $('Prepare Qdrant Point').first().json.point_id,\n    title: $('Prepare Experience Document').first().json.experience.title,\n    goal: $('Prepare Experience Document').first().json.experience.goal,\n    status: 'EXPERIENCE_STORED'\n  }\n}];"
+      },
+      "id": "97f79d81-dffd-4d0d-a3cc-ca09d14f60bd",
+      "name": "Experience Saved",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4128,
+        54160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const env = $json;\nconst steps = Array.isArray(env.plan?.steps) ? env.plan.steps : [];\nconst mark = (s) => (s.failed === true && s.optional === true) ? '⏭' : (s.failed === true ? '❌' : (s.completed === true ? '✅' : '⏸'));\n\nconst lines = steps.map(s => {\n  let line = `${mark(s)} ${s.id} · ${s.action || s.description || s.tool || ''}`;\n  if (s.summary) line += ` — ${String(s.summary).slice(0, 200)}`;\n  if (s.error) line += ` (error: ${String(s.error).slice(0, 150)})`;\n  return line;\n});\n\nconst parts = [];\nparts.push(`MOMI report — ${env.final_status || env.state?.status || 'completed'}`);\nparts.push(`Goal: ${env.plan?.goal || env.query || ''}`);\nif (lines.length) {\n  parts.push('');\n  parts.push(...lines);\n}\nif (env.verification?.summary) {\n  parts.push('');\n  parts.push(`Verification: ${String(env.verification.summary).slice(0, 400)}`);\n}\nif (env.diagnosis?.correction) {\n  parts.push(`Next: ${env.diagnosis.correction}`);\n}\nconst skippedOptional = (env.state?.skipped_optional_steps || []).filter(Boolean);\nif (skippedOptional.length) {\n  parts.push(`⏭ Skipped optional step(s): ${skippedOptional.join(', ')} - non-blocking; the fields they fed were left blank.`);\n}\n/*MOMI-PATCH:P7a.1*/if (env.state?.waiting_for_approval) {\n  parts.push('⏳ Some steps still need your approval.');\n}\n\nconst response = parts.join('\\n');\n\nreturn [{ json: { ...env, response } }];"
+      },
+      "id": "b550ff05-35ac-4e29-a464-ac39aaceaa36",
+      "name": "MOMI Final Response1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -5920,
+        54352
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "let env = {};\ntry { env = $('MOMI Final Result').first().json; } catch (error) { env = $json; }\nconst response = $json.message?.content ?? $json.response ?? env.message ?? 'MOMI completed the workflow.';\nreturn [{\n  json: {\n    status: env.final_status || env.status || 'completed',\n    success: env.success === true,\n    response,\n    output: response,\n    request_id: env.request_id,\n    session_id: env.session_id,\n    user: env.user,\n    channel: env.channel,\n    plan: env.plan,\n    state: env.state,\n    verification: env.verification\n  }\n}];"
+      },
+      "id": "39753e44-0df9-49e5-8603-a9724cd3ff61",
+      "name": "MOMI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -5696,
+        54352
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $json, st = j.state || {};\nconst steps = Array.isArray(j.plan?.steps) ? j.plan.steps : [];\nconst failedStep = steps.find(s => s.failed === true);\nconst terminal = st.execution_status === 'failed' && st.needs_replan === false;\nconst reason = st.failure_reason || failedStep?.error || failedStep?.summary || j.message || null;\nreturn [{\n  json: {\n    ...j,\n    final_status: terminal ? 'FAILED' : 'UNEXPECTED_STATUS',\n    success: false,\n    message: terminal ? (reason || 'MOMI action failed.') : `MOMI stopped: unexpected execution_status ${st.execution_status}`,\n    failure_reason: terminal ? (reason || 'MOMI action failed.') : (j.failure_reason || null)\n  }\n}];\n"
+      },
+      "id": "d39a09e8-9100-4aa9-845d-28d9886b302a",
+      "name": "Unexpected Status - Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -6368,
+        54448
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "momi/approve",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "041c0acc-78f2-4d39-b92b-7350aa3da5b2",
+      "name": "MOMI Approval Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -13312,
+        55392
+      ],
+      "webhookId": "14d36a0c-6420-4910-ba08-c771e6cc8af6"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body ?? $json;\nconst token = body.approval_token ?? body.token ?? body.data?.approval_token;\nconst decision = String(body.decision ?? body.approval ?? body.data?.decision ?? '').toLowerCase();\nif (!token) throw new Error('Missing approval_token');\nif (!['approve', 'approved', 'yes', 'reject', 'rejected', 'no', 'deny'].includes(decision)) {\n  throw new Error('Decision must be approve or reject');\n}\nreturn [{\n  json: {\n    approval_token: String(token),\n    decision,\n    comment: body.comment ?? body.data?.comment ?? '',\n    mode: 'approval',\n    conversation_id: body.conversation_id ?? body.data?.conversation_id ?? null,\n    reply_to_id: body.reply_to_id ?? body.data?.reply_to_id ?? null\n  }\n}];"
+      },
+      "id": "0dda9623-a3c5-4c7d-8cd0-8f9608fc87df",
+      "name": "Normalize Approval Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -12864,
+        55392
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const token = $json.approval_token;\nconst store = $getWorkflowStaticData('global');\nconst saved = store.pending?.[token];\n\nif (!saved) {\n  throw new Error(\n    `No pending MOMI state for ${token}. ` +\n    `Demo store is n8n workflow static data (lost on restart / other workers). ` +\n    `Replace this node with Redis/Postgres/Data Store lookup.`\n  );\n}\n\ndelete store.pending[token];\n\nreturn [{\n  json: {\n    ...saved,\n    decision: $json.decision,\n    comment: $json.comment ?? '',\n    approval_token: token\n  }\n}];"
+      },
+      "id": "6e2cb380-c7e1-4ebf-ab25-15590e4b3ed4",
+      "name": "Load Pending MOMI State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -12640,
+        55392
+      ],
+      "notes": "Reads the demo static store written by Persist Approval State."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ ['approve','approved','yes'].includes($json.decision) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0f58a99d-3fc0-4632-9c30-7f1f18330bcd",
+      "name": "Approval Decision",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -12416,
+        55392
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const state = {\n  ...($json.state || {}),\n  status: 'rejected',\n  waiting_for_approval: false,\n  execution_status: 'failed'\n};\nreturn [{\n  json: {\n    ...$json,\n    status: 'rejected',\n    final_status: 'REJECTED',\n    success: false,\n    request_id: $json.request_id,\n    message: 'MOMI action was rejected. No approved action was executed.',\n    state\n  }\n}];"
+      },
+      "id": "e11d0e0f-cd31-4c63-8aa8-3d725a60a366",
+      "name": "Approval Rejected",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -6368,
+        56032
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const env = $json;\nif (!env.state?.waiting_for_approval && env.state?.execution_status !== 'waiting_for_approval') {\n  throw new Error('No approval is pending');\n}\n\nconst stepId = env.state.current_step ?? env.state.next_step?.id;\nconst steps = env.plan.steps.map(s =>\n  s.id === stepId ? { ...s, requires_approval: false, approval_granted: true } : s\n);\nconst next = steps.find(s => s.id === stepId);\n\nreturn [{\n  json: {\n    ...env,\n    plan: { ...env.plan, steps },\n    state: {\n      ...env.state,\n      waiting_for_approval: false,\n      execution_status: 'ready',\n      status: 'executing',\n      next_step: next,\n      current_step: stepId,\n      approval_history: [\n        ...(env.state.approval_history || []),\n        { step_id: stepId, decision: 'approved', at: new Date().toISOString() }\n      ]\n    },\n    resume_approved: true\n  }\n}];"
+      },
+      "id": "9903b800-e607-470b-9397-5d818be81e87",
+      "name": "Resume Approved Step",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -12192,
+        55296
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// EXECUTE WEB - Browser Automation  (code node)\nconst env = $json;\nconst step = env.state?.next_step ?? {};\n\n// Check if this is a browser/web step\nconst isBrowserStep = ['web_search', 'browser_open', 'browser_click', 'browser_type', 'browser_screenshot', 'browser_extract', 'browser_navigate'].includes(step.tool);\n\nreturn [{\n  json: {\n    ...env,\n    tool_result: {\n      success: true,\n      data: {\n        placeholder: false,\n        call_subworkflow: 'MOMI - Browser Automation',   // <-- your sub-workflow name\n        subworkflow_workflowId: 'YOUR_WORKFLOW_ID_HERE', // <-- replace with actual ID\n        browser_params: {\n          url: step.parameters?.url || step.parameters?.target || '',\n          operations: step.parameters?.operations || buildDefaultOperations(step),\n          session_id: env.session_id,\n          timeout: step.parameters?.timeout || 120000,\n          screenshot: true\n        },\n        tool: step.tool,\n        action: step.action,\n        parameters: step.parameters ?? {}\n      },\n      summary: `Calling MOMI - Browser Automation for: ${step.action || step.tool}`\n    }\n  }\n}];\n\nfunction buildDefaultOperations(step) {\n  const ops = [];\n  const p = step.parameters || {};\n  \n  if (p.url) {\n    ops.push({ action: 'goto', url: p.url, timeout: p.navigation_timeout || 30000 });\n  }\n  if (p.click) {\n    ops.push({ action: 'click', selector: p.click, timeout: 15000 });\n  }\n  if (p.type && p.into) {\n    ops.push({ action: 'fill', selector: p.into, value: p.type, press_enter: p.press_enter || false });\n  }\n  if (p.wait_for) {\n    ops.push({ action: 'wait_for_selector', selector: p.wait_for, state: p.wait_state || 'visible' });\n  }\n  if (p.extract) {\n    ops.push({ action: 'extract', selector: p.extract, attribute: p.attribute || null });\n  }\n  if (p.extract_table) {\n    ops.push({ action: 'extract_table', selector: p.extract_table });\n  }\n  if (p.extract_list) {\n    ops.push({ action: 'extract_list', selector: p.extract_list });\n  }\n  ops.push({ action: 'screenshot', full_page: p.full_page !== false });\n  \n  return ops;\n}"
+      },
+      "id": "33b560ed-44b5-44e0-8a1e-6cd33aa79cc4",
+      "name": "EXECUTE WEB - Browser Automation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9952,
+        56416
+      ],
+      "notes": "Replace with the real web adapter. Must return envelope + tool_result."
+    },
+    {
+      "parameters": {
+        "jsCode": "const env=$json,tool=String(env.state?.next_step?.tool||'');const isScrape=tool==='python_execute',isCredential=tool==='credential_lookup',isEfc=tool==='efc_browser'||tool.startsWith('efc_'),isBrowser=tool.startsWith('browser_')||tool.startsWith('web_')||tool.startsWith('windows_')||tool.startsWith('file_')||tool==='pelicargo_resolve_shipment'||tool.startsWith('pelicargo_'),isApi=tool==='api_request';return[{json:{...env,hub_route:isScrape?'scrape':isCredential?'credential':isEfc?'efc':isBrowser?'browser':isApi?'api':tool.startsWith('clickup_')?'clickup':tool.startsWith('email_')||tool.startsWith('calendar_')?'email':'unknown',tool}}];"
+      },
+      "id": "325f6ce6-007e-46ab-9bce-8c7b88447d01",
+      "name": "Hub Router",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -11296,
+        55296
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "r-scrape",
+                    "leftValue": "={{ $json.hub_route }}",
+                    "rightValue": "scrape",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "r-cred",
+                    "leftValue": "={{ $json.hub_route }}",
+                    "rightValue": "credential",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "r-efc",
+                    "leftValue": "={{ $json.hub_route }}",
+                    "rightValue": "efc",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "r-browser",
+                    "leftValue": "={{ $json.hub_route }}",
+                    "rightValue": "browser",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "r-api",
+                    "leftValue": "={{ $json.hub_route }}",
+                    "rightValue": "api",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "unknown"
+        }
+      },
+      "id": "d2f4da73-2ae8-4bae-a52c-f06f6c5d4721",
+      "name": "Route by Tool Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -11072,
+        55248
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Scrape: wrap python_execute for the existing scrape service ──────────────\n// Delegates to the existing POST scrape endpoint at host.docker.internal:8765\nconst step = $json.state?.next_step || {};\nconst p = step.parameters || {};\nconst q = String($json.chatInput || $json.query || '');\n\nlet url = p.url || '';\nif (!url) {\n  const m = q.match(/https?:\\/\\/[^\\s<>\"']+/i);\n  if (m) url = m[0];\n}\n\nlet query = String(p.query || '').trim();\nif (!query) {\n  query = q.replace(url, ' ').replace(/https?:\\/\\/\\/S+/gi, ' ').replace(/\\b(scrape|contacts?|agents?|please|from|directory|excel|xlsx|outlook|email|intro|momi)\\b/gi, ' ').replace(/\\s+/g, ' ').trim().slice(0, 80);\n}\n\nconst payload = {\n  url: url,\n  query: query,\n  out: p.out || '/app/out/contacts.xlsx',\n  max_pages: p.max_pages || 8,\n  login_url: p.login_url || '',\n  profile: p.profile || ''\n};\nif (p.login === true) payload.login = true;\n\nreturn [{\n  json: {\n    ...$json,\n    scrape_payload: payload,\n    has_url: !!url\n  }\n}];"
+      },
+      "id": "86a9d0cf-fc38-48ec-b09f-9aaeb7388aed",
+      "name": "Prepare Scrape",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10848,
+        55264
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-url",
+              "leftValue": "={{ $json.has_url }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c3ea188b-ebdb-4ca5-9054-823137466997",
+      "name": "Has URL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -10624,
+        55264
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8765/scrape",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.scrape_payload) }}",
+        "options": {
+          "timeout": 900000
+        }
+      },
+      "id": "507ba59d-1614-4578-86e1-9dee74bdd4f2",
+      "name": "POST scrape",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -10400,
+        55168
+      ],
+      "notes": "Calls the existing scrape service. Update URL if your scrape service runs elsewhere."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Format scrape result ───────────────────────────────────────────────────\nconst j = $json;\nconst ok = j.ok === true || Number(j.exitCode) === 0;\nconst xlsx = j.xlsx || '/app/out/contacts.xlsx';\nconst err = String(j.stderr || j.error || j.message || '').slice(0, 800);\n\nlet output;\nif (ok) {\n  output = 'Scrape finished. Workbook: ' + xlsx + '  JSON: ' + (j.json_path || '') + '\\nOn the PC look in C:\\\\Users\\\\Ubed\\\\momi_hands\\\\out\\\\contacts.xlsx';\n  if (j.stdout) output += '\\n' + String(j.stdout).slice(-500);\n} else {\n  output = 'Scrape failed. ' + (err || JSON.stringify(j).slice(0, 800));\n}\n\nreturn [{\n  json: {\n    success: ok,\n    data: { xlsx, json_path: j.json_path, ok },\n    summary: ok ? 'Scrape completed successfully' : 'Scrape failed',\n    output: output.slice(0, 3000),\n    tool: 'python_execute',\n    action: 'Web scrape'\n  }\n}];"
+      },
+      "id": "245e7778-55e7-4857-b570-472d54a36198",
+      "name": "Format Scrape Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10176,
+        55168
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    success: false,\n    data: null,\n    summary: 'Scrape: no URL provided',\n    output: 'Scrape requires a URL. Please include an https:// link in your request.',\n    tool: 'python_execute',\n    action: 'Web scrape'\n  }\n}];"
+      },
+      "id": "e0aa3fab-95f3-4091-b444-5194458d0196",
+      "name": "Scrape No URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10176,
+        55360
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "05hOYfCuuG9sFjL3",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/05hOYfCuuG9sFjL3",
+          "cachedResultName": "MOMI - Credential Store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        -10848,
+        54720
+      ],
+      "id": "34488f80-d0c0-4952-9df4-42b49ce7bb47",
+      "name": "Call MOMI - Credential Store",
+      "notes": "⚠️  Replace workflowId with your actual MOMI - Credential Store workflow ID. Right-click → Change Workflow."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "6KUdlHm74TDfdAD8",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/6KUdlHm74TDfdAD8",
+          "cachedResultName": "MOMI - EFC Browser Executor"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "envelope": "={{ $json }}",
+            "request_id": "={{ $json.request_id }}",
+            "session_id": "={{ $json.session_id }}",
+            "query": "={{ $json.query }}",
+            "plan": "={{ $json.plan }}",
+            "state": "={{ $json.state }}",
+            "next_step": "={{ $json.state.next_step }}",
+            "results": "={{ $json.state.results }}",
+            "mawb": "={{ $json.state.next_step.parameters.mawb }}",
+            "operations": "={{ $json.state.next_step.parameters.operations || $json.state.next_step.parameters.operation }}",
+            "timeout": "={{ $json.state.next_step.parameters.timeout || 240000 }}",
+            "screenshot": "={{ $json.state.next_step.parameters.screenshot !== false }}",
+            "playwright_service_url": "={{ $json.state.next_step.parameters.playwright_service_url || 'http://host.docker.internal:8766' }}",
+            "credentials": "={{ $json.state.next_step.parameters.credentials || {} }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "envelope",
+              "displayName": "envelope",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            },
+            {
+              "id": "request_id",
+              "displayName": "request_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "session_id",
+              "displayName": "session_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "plan",
+              "displayName": "plan",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            },
+            {
+              "id": "next_step",
+              "displayName": "next_step",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            },
+            {
+              "id": "results",
+              "displayName": "results",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            },
+            {
+              "id": "mawb",
+              "displayName": "mawb",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "operations",
+              "displayName": "operations",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "timeout",
+              "displayName": "timeout",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "screenshot",
+              "displayName": "screenshot",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "boolean",
+              "removed": false
+            },
+            {
+              "id": "playwright_service_url",
+              "displayName": "playwright_service_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "credentials",
+              "displayName": "credentials",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            },
+            {
+              "id": "approval_granted",
+              "displayName": "approval_granted",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "boolean",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        -10848,
+        54912
+      ],
+      "id": "5e7c4483-6780-4411-aee0-e81201cc6167",
+      "name": "Call MOMI - EFC Browser Executor",
+      "notes": "Pass the complete execution envelope and resolved EFC parameters into MOMI - EFC Browser Executor. Billing writes are approval-gated upstream."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "RDUOQyrlCWsJzmKt",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/RDUOQyrlCWsJzmKt",
+          "cachedResultName": "MOMI - Browser Automation"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "url": "={{ $json.state?.next_step?.parameters?.url || $json.state?.next_step?.parameters?.target }}",
+            "operations": "={{ $json.state?.next_step?.parameters?.operations || [] }}",
+            "session_id": "={{ $json.session_id }}",
+            "timeout": "={{ $json.state?.next_step?.parameters?.timeout || 120000 }}",
+            "screenshot": "={{ $json.state?.next_step?.parameters?.screenshot !== false }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "url",
+              "displayName": "url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "operations",
+              "displayName": "operations",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "session_id",
+              "displayName": "session_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "timeout",
+              "displayName": "timeout",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            },
+            {
+              "id": "screenshot",
+              "displayName": "screenshot",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "boolean"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        -10176,
+        55552
+      ],
+      "id": "a9d1f0f9-5e0a-4bb4-b464-bafc0cfeaef2",
+      "name": "Call MOMI - Browser Automation",
+      "notes": "⚠️  Replace workflowId with your actual MOMI - Browser Automation workflow ID. Right-click → Change Workflow."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── API Request executor (generic HTTP) ──────────────────────────────────────\nconst step = $json.state?.next_step || {};\nconst p = step.parameters || {};\nconst method = String(p.method || 'GET').toUpperCase();\nconst url = String(p.url || '');\nconst headers = p.headers || {};\nconst body = p.body || null;\n\nif (!url) {\n  return [{\n    json: {\n      success: false,\n      data: null,\n      summary: 'api_request: no URL provided',\n      output: 'api_request requires a URL in parameters.url',\n      tool: 'api_request',\n      action: 'API request'\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    ...$json,\n    api_request: {\n      method,\n      url,\n      headers,\n      body: body ? (typeof body === 'string' ? body : JSON.stringify(body)) : null\n    }\n  }\n}];"
+      },
+      "id": "3fff3558-796e-46cc-a209-2fa0b9c15395",
+      "name": "Prepare API Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10400,
+        55744
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Format API result ──────────────────────────────────────────────────────\nconst j = $json;\n\nif (j.success !== false && j.status >= 200 && j.status < 300) {\n  return [{\n    json: {\n      success: true,\n      data: j.data || j.response || j.body || {},\n      summary: `API ${j.method || 'GET'} ${j.url} → ${j.status}`,\n      output: 'API request completed successfully.',\n      tool: 'api_request',\n      action: 'API request'\n    }\n  }];\n} else {\n  return [{\n    json: {\n      success: false,\n      data: j.data || j.response || null,\n      summary: `API request failed: ${j.status} ${j.error || ''}`,\n      output: `API request failed (${j.status}): ${j.error || j.message || 'unknown error'}`,\n      tool: 'api_request',\n      action: 'API request'\n    }\n  }];\n}"
+      },
+      "id": "519e53b6-e8d7-42cf-b2ed-adfbf9df6743",
+      "name": "Format API Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10176,
+        55744
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Normalise whatever the executor sub-workflow returned into a MOMI tool_result ──\n// PATCH P1: the Browser Automation sub-workflow returns\n//   {session_id, operations:[{success,http_status,error,...}], extracted, combined_text, ...}\n// with NO top-level success/status/error key, so the old code fell through to\n// `unstructured_executor_result` and hid the real cause (HTTP 0 = service down).\nconst j = $json;\nconst step = j.state?.next_step || {};\n\nfunction firstOpError(ops) {\n  for (const op of ops) {\n    if (op && op.success === false) {\n      return op.error || op.message || `browser operation '${op.action || op.step}' failed`;\n    }\n  }\n  return null;\n}\n\nfunction classify(text) {\n  const t = String(text || '');\n  if (/HTTP\\s*0\\b/i.test(t) || /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|socket hang up/i.test(t)) {\n    return 'service_unreachable';\n  }\n  if (/unauthor|forbidden|invalid (user|login|password)|credential/i.test(t)) return 'auth_failed';\n  if (/timed?\\s*out|timeout/i.test(t)) return 'timeout';\n  return null;\n}\n\nlet r = j.tool_result;\n\nif (!r) {\n  const c = j.data?.tool_result ?? j.data ?? null;\n  const co = (c && typeof c === 'object') ? c : null;\n\n  const ops = Array.isArray(co?.operations) ? co.operations : null;\n  const opError = ops ? firstOpError(ops) : null;\n  const isBrowserShape =\n    ops !== null ||\n    (co && (co.combined_text !== undefined || (co.session_id !== undefined && co.operations !== undefined)));\n\n  const creds = co ? co.credentials : null;\n  const hasCreds = creds && typeof creds === 'object' && Object.keys(creds).length > 0;\n\n  if (hasCreds && (co.not_found === false || typeof co.fields_returned === 'number')) {\n    // Credential-store SUCCESS shape: {credentials:{...}, not_found:false, fields_returned:N}.\n    r = {\n      success: true,\n      data: creds,\n      summary: `Credentials retrieved (${Object.keys(creds).length} fields)`,\n      output: '',\n      tool: 'credential_lookup',\n      action: step.action || 'Retrieve stored credentials',\n      error: null\n    };\n  } else if (isBrowserShape) {\n    // Browser Automation shape - derive success from the operations log.\n    const ok = ops ? ops.length > 0 && ops.every(op => op.success !== false) : false;\n    const errText = opError || (co?.error ?? co?.message ?? '');\n    const httpStatus = Array.isArray(ops)\n      ? (ops.find(o => o.http_status !== undefined)?.http_status ?? null)\n      : null;\n    const kind = classify(errText) || (ok ? null : 'executor_failed');\n    r = {\n      success: ok,\n      data: co,\n      summary: ok\n        ? `Browser automation OK (${ops ? ops.length : 0} operations)`\n        : `Browser automation failed: ${errText || 'no success signal from executor'}` +\n          (httpStatus === 0 ? ' (HTTP 0 - Playwright service unreachable)' : ''),\n      output: '',\n      tool: j.tool || step.tool,\n      action: j.action || step.action,\n      error: kind\n    };\n  } else if (typeof j.success === 'boolean' && co && (co.steps_executed !== undefined || co.extracted_texts !== undefined || (co.verification && typeof co.verification === 'object') || co.xlsx !== undefined || co.json_path !== undefined)) {\n    // Executor TOP shape (EFC/scrape/API: {success, data, summary, ...} with evidence keys).\n    r = {\n      success: j.success === true,\n      data: co,\n      summary: j.summary ?? '',\n      output: j.output ?? '',\n      tool: j.tool || step.tool,\n      action: j.action || step.action,\n      error: j.success === true ? null : (j.error ?? 'executor_failed')\n    };\n  } else if (co && ('success' in co || 'status' in co || 'error' in co)) {\n    r = {\n      success: co.success === true || co.status === 'success' || co.status === 'completed',\n      data: co.data ?? co,\n      summary: co.summary ?? co.message ?? '',\n      output: co.output ?? '',\n      tool: step.tool,\n      action: step.action,\n      error: co.error ?? null\n    };\n  } else {\n    r = {\n      success: false,\n      data: co,\n      summary: 'Executor returned no structured success result.',\n      output: '',\n      tool: step.tool,\n      action: step.action,\n      error: 'unstructured_executor_result'\n    };\n  }\n}\n\n// Last chance: turn a generic failure code into an actionable one.\nif (r.error && (r.error === 'executor_failed' || r.error === 'unstructured_executor_result')) {\n  const kind = classify(r.summary) || classify(r.output) || classify(JSON.stringify(r.data ?? {}));\n  if (kind) r.error = kind;\n}\n\nreturn [{\n  json: {\n    ...j,\n    tool_result: {\n      success: r.success === true,\n      data: r.data ?? null,\n      summary: r.summary ?? '',\n      output: r.output ?? '',\n      tool: r.tool || step.tool || 'unknown',\n      action: r.action || step.action || '',\n      error: r.error ?? null\n    }\n  }\n}];\n"
+      },
+      "id": "a99d31da-f087-44b8-bf87-0bb2a160ced8",
+      "name": "Format Hub Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9952,
+        55392
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const env=$json,s=env.state?.next_step||{};return[{json:{...env,tool_result:{success:false,data:null,summary:`Unknown or unroutable tool: ${s.tool||'unknown'}`,output:`No connected executor for ${s.tool||'unknown'}.`,tool:s.tool||'unknown',action:s.action||'',error:'unknown_tool'}}}];"
+      },
+      "id": "f75ad405-93a7-4fa0-891a-b8a1268e9724",
+      "name": "Unknown Tool Fallback1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -10176,
+        56416
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "valid",
+              "leftValue": "={{ $json.input_valid === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0ccdeae2-8228-4b20-84ae-0c06149fcbdc",
+      "name": "Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -12192,
+        56512
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$json;return[{json:{status:'invalid_input',success:false,final_status:'INVALID_INPUT',request_id:x.request_id,session_id:x.session_id,message:'MOMI received an empty request. Provide a task or question in chatInput/query.',response:'MOMI received an empty request. Provide a task or question in chatInput/query.'}}];"
+      },
+      "id": "2480f965-4bd8-497f-83f5-89ebb2a9d661",
+      "name": "Invalid Input Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -11968,
+        56512
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/embeddings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({model:'nomic-embed-text',prompt:$json.experience_search_query||$json.original_query||$json.query}) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "91a777eb-6d4e-441b-b37b-e9a56e474d9d",
+      "name": "Ollama - Embed Experience Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -10624,
+        56224
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "/*MOMI-PATCH:P4a.0*/const env=$json,step=env.state?.next_step??{},results=env.state?.results??{};const skipped=[];function get(path){const a=String(path).split('.');let v=results[a.shift()];for(const p of a){if(v==null)return undefined;if(Object.prototype.hasOwnProperty.call(v,p))v=v[p];else if(v.data&&Object.prototype.hasOwnProperty.call(v.data,p))v=v.data[p];else return undefined}return v}function r(v){if(typeof v==='string'){const e=v.match(/^\\{\\{\\s*([^}]+?)\\s*\\}\\}$/);if(e){const x=get(e[1]);if(x===undefined||x===null){skipped.push(e[1]);return ''}return x}return v.replace(/\\{\\{\\s*([^}]+?)\\s*\\}\\}/g,(m,p)=>{const x=get(p);if(x===undefined||x===null){skipped.push(p);return ''}return typeof x==='object'?JSON.stringify(x):String(x)})}if(Array.isArray(v))return v.map(r);if(v&&typeof v==='object')return Object.fromEntries(Object.entries(v).map(([k,x])=>[k,r(x)]));return v}const parameters=r(step.parameters||{});const unresolved=JSON.stringify(parameters).match(/\\{\\{\\s*[^}]+\\s*\\}\\}/g)||[];const unresolved_refs=[...new Set(skipped)];return[{json:{...env,resolved_parameters:parameters,state:{...env.state,next_step:{...step,parameters},resolved_parameter_warnings:unresolved,unresolved_refs}}}];"
+      },
+      "id": "2a96d3fb-7101-4d54-94d7-e144d1e05148",
+      "name": "Resolve Step References",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -11744,
+        54544
+      ],
+      "notes": "V4 resolves {{step_id.field}} references against committed results."
+    },
+    {
+      "parameters": {
+        "jsCode": "const q=String($json.query||$json.chatInput||'').trim(),s=q.toLowerCase();\n\nfunction st(id,tool,family,action,parameters,depends=[],approval=false){\n  return {id,tool,tool_family:family,action,description:action,parameters,depends_on:depends,\n    requires_approval:approval,completed:false,failed:false,retry_count:0,result:null,summary:null,error:null};\n}\nfunction mawbsIn(x){\n  return [...new Set((x.match(/\\b\\d{3}\\s*[- ]?\\s*\\d{8}\\b/g)||[]).map(v=>{\n    const m=v.match(/(\\d{3})\\s*[- ]?\\s*(\\d{8})/); return `${m[1]}-${m[2]}`;\n  }))];\n}\n// EFC shipment references like R263550 (EFC billing jobs are keyed by R-number, no MAWB needed).\nfunction rrefsIn(x){\n  return [...new Set((x.match(/\\bR\\s?(\\d{6})\\b/gi)||[]).map(v=>{\n    const m=v.match(/R\\s?(\\d{6})/i); return 'R'+m[1];\n  }))];\n}\nfunction pick(re, fallback=''){\n  const m=q.match(re); return m ? String(m[1]||'').trim() : fallback;\n}\n// Known EFC billing row labels (code + description). Query parsing matches the\n// longest labels first so \"freight\" never swallows \"inland freight\".\nconst LINE_CATALOG=[\n  {code:'3201',description:'Inland Freight'},\n  {code:'3101',description:'Freight'},\n  {code:'3064',description:'Profit Share'}\n];\nfunction linesFromQuery(text){\n  let low=String(text||'').toLowerCase();\n  const hits=[];\n  const ordered=[...LINE_CATALOG].sort((a,b)=>b.description.length-a.description.length);\n  for(const L of ordered){\n    const needle=L.description.toLowerCase();\n    const i=low.indexOf(needle);\n    if(i>=0){\n      hits.push({L,i});\n      low=low.slice(0,i)+' '.repeat(needle.length)+low.slice(i+needle.length);\n    }\n  }\n  return hits.sort((a,b)=>a.i-b.i).map(h=>({code:h.L.code,description:h.L.description,charge_amount:null,cost_amount:null,ap:true}));\n}\nfunction parseBillingLines(){\n  if (Array.isArray($json.billing_lines)) return $json.billing_lines;\n  if (Array.isArray($json.billing?.lines)) return $json.billing.lines;\n  const fromQuery=linesFromQuery(q);\n  if (fromQuery.length) return fromQuery;\n  return [\n    {code:'3201',description:'Inland Freight',charge_amount:null,cost_amount:null,ap:true},\n    {code:'3101',description:'Freight',charge_amount:null,cost_amount:null,ap:true},\n    {code:'3064',description:'Profit Share',charge_amount:null,cost_amount:null,ap:true}\n  ];\n}\n\nconst mawbs=mawbsIn(q);\nconst rrefs=rrefsIn(q);\nconst billingWord=/\\b(billing|bill\\s*doc)\\b/i.test(q);\nconst createVerb=/\\b(create|make|setup|set\\s*up|prepare|generate|do|new|add|open|start|save|bill)\\b/i.test(q);\nconst billMawb=/\\bbill\\s+(?:mawb\\s+)?\\d{3}\\s*[- ]?\\s*\\d{8}\\b/i.test(q);\nconst billR=/\\bbill\\b.{0,30}?\\bR\\s?\\d{6}\\b/i.test(q);\nconst billing=(mawbs.length>0||rrefs.length>0)&&(billMawb||billR||(billingWord&&createVerb));\n\n// \"dont add any figures\" / \"without amounts\" / \"leave figures blank\" all mean leave_blank.\nconst noAmounts=/(?:do\\s*not|don't|dont|without)\\s+(?:enter|fill|add)\\s+(?:the\\s+|any\\s+)?(?:amounts?|figures?)/i.test(q) ||\n  /leave\\s+(?:the\\s+)?(?:amounts?|figures?)\\s+(?:blank|empty)/i.test(q);\n\nconst billTo=$json.billing?.bill_to || $json.bill_to || pick(/bill\\s*to\\s+([^\\n,;]+?)(?=\\s*(?:,|;|\\b(?:create|save|billing|update|for)\\b|$))/i,'Pelicargo Inc-BOS,MA');\nconst billingDate=$json.billing?.billing_date || $json.billing_date || pick(/billing\\s*date\\s+([0-9]{1,2}\\/[0-9]{1,2}\\/[0-9]{4})/i,'');\nconst docNumber=$json.billing?.doc_number || $json.doc_number || pick(/doc(?:ument)?\\s*(?:number|no\\.?)\\s+([^\\n,;]+)/i,'');\nconst doRefNo=$json.billing?.do_ref_no || $json.do_ref_no || pick(/do\\s*ref(?:erence)?\\s*(?:no\\.?|number)?\\s+([^\\n,;]+)/i,'');\nconst glPeriod=$json.billing?.gl_period || $json.gl_period || pick(/g\\/l\\s*period\\s+([0-9]{4}-[0-9]{2})/i,'');\nconst billingRemark=$json.billing?.billing_remark || $json.billing_remark || pick(/billing\\s*remark\\s+([^\\n]+)/i,'');\nconst vatTax=Boolean($json.billing?.vat_tax ?? $json.vat_tax ?? /\\bvat\\s*(?:tax)?\\s*yes\\b/i.test(q));\nconst billingLines=parseBillingLines();\n\nconst EFC_CRED_FIELDS=[\n  'efc_username','efc_password','efc_base_url',\n  'efc_username_selector','efc_password_selector','efc_login_button_selector',\n  'efc_billing_url','efc_billing_menu_selector','efc_new_billing_selector',\n  'efc_bill_to_selector','efc_billing_date_selector','efc_doc_number_selector',\n  'efc_do_ref_no_selector','efc_gl_period_selector','efc_vat_selector',\n  'efc_billing_remark_selector','efc_billing_line_selector_map',\n  'efc_save_selector','efc_billing_code_selector'\n];\n\nif(billing){\n  const steps=[];\n  // MAWB-based billing (unchanged legacy flow: Pelicargo + EFC + ClickUp).\n  for(let i=0;i<mawbs.length;i++){\n    const m=mawbs[i],p=`${i+1}`,a=`${p}_pelicargo`,b=`${p}_credentials`,c=`${p}_efc`,\n      e=`${p}_cu_search`,f=`${p}_cu_read`,g=`${p}_cu_update`;\n\n    steps.push(st(a,'pelicargo_resolve_shipment','web',`Resolve Pelicargo shipment ${m}`,{\n      mawb:m,url:'https://app.pelicargo.com/login',session_id:`pelicargo-${$json.session_id||'default'}`,timeout:180000,\n      operations:[\n        {action:'goto',timeout:45000},\n        {action:'screenshot',full_page:true,label:'pelicargo-page',optional:true},\n        {action:'extract',selector:'body',timeout:15000,optional:true}\n      ]\n    }));\n    steps[steps.length-1].optional = true;   // optional: only feeds DO Ref No.\n\n    steps.push(st(b,'credential_lookup','credential',`Retrieve EFC credentials for ${m}`,{\n      service:'efc',lookup_fields:EFC_CRED_FIELDS\n    }));\n\n    steps.push(st(c,'efc_domestic_billing','efc',`Create EFC Domestic Billing for ${m}`,{\n      operation:'DOMESTIC_BILLING',\n      mawb:m,\n      bill_to:billTo,\n      billing_date:billingDate,\n      doc_number:docNumber || m,\n      do_ref_no:doRefNo || '',\n      gl_period:glPeriod,\n      vat_tax:vatTax,\n      billing_remark:billingRemark,\n      charge_lines:billingLines.map(x=>x.description || x.code),\n      billing_lines:billingLines,\n      amount_mode:noAmounts?'leave_blank':'provided_only',\n      pelicargo_from_step:a,\n      credentials_from_step:b,\n      session_id:`efc-${$json.session_id||'default'}`,\n      timeout:240000,\n      screenshot:true,\n      save:true\n    },[b],true));\n\n    if(/clickup/i.test(s)){\n    steps.push(st(e,'clickup_search_tasks','clickup',`Find ClickUp task for ${m}`,{query:m,mawb:m},[c]));\n    steps.push(st(f,'clickup_get_task','clickup',`Read EFT AE # for ${m}`,{task_id:`{{${e}.task_id}}`},[e]));\n    steps.push(st(g,'clickup_update_custom_field','clickup',`Set EFT AE # for ${m}`,{\n      task_id:`{{${e}.task_id}}`,field_name:'EFT AE #',field_value:`{{${c}.document_number}}`,\n      expected_existing_value:`{{${f}.EFT AE #}}`,approval_if_changed:true\n    },[f,c]));\n    }\n  }\n  // R-number billing (e.g. R263550): minimal scope — credentials + EFC only.\n  // No Pelicargo resolve (no MAWB exists) and no ClickUp update (not requested;\n  // the ClickUp adapter is still a placeholder and would poison verification).\n  for(let i=0;i<rrefs.length;i++){\n    const r=rrefs[i],b=`r${i+1}_credentials`,c=`r${i+1}_efc`;\n\n    steps.push(st(b,'credential_lookup','credential',`Retrieve EFC credentials for ${r}`,{\n      service:'efc',lookup_fields:EFC_CRED_FIELDS\n    }));\n\n    steps.push(st(c,'efc_domestic_billing','efc',`Create EFC Domestic Billing for ${r}`,{\n      operation:'DOMESTIC_BILLING',\n      mawb:null,\n      r_number:r,\n      shipment_ref:r,\n      bill_to:billTo,\n      billing_date:billingDate,\n      doc_number:docNumber || r,\n      do_ref_no:doRefNo || '',\n      gl_period:glPeriod,\n      vat_tax:vatTax,\n      billing_remark:billingRemark,\n      charge_lines:billingLines.map(x=>x.description || x.code),\n      billing_lines:billingLines,\n      amount_mode:noAmounts?'leave_blank':'provided_only',\n      credentials_from_step:b,\n      session_id:`efc-${$json.session_id||'default'}`,\n      timeout:240000,\n      screenshot:true,\n      save:true\n    },[b],true));\n  }\n  const total=mawbs.length+rrefs.length;\n  return [{json:{\n    ...$json,\n    playbook:'domestic_billing',\n    use_llm_planner:false,\n    plan:{goal:q,steps},\n    batch:{enabled:total>1,total,mawbs,r_numbers:rrefs,amount_mode:noAmounts?'leave_blank':'provided_only'}\n  }}];\n}\n\nconst url=q.match(/https?:\\/\\/[^\\s<>\"']+/i);\nlet pb=null;\nconst efc=/\\b(eawb|fwb|fhl|efc|eftcloud|etransmission|etransmit|transmission status|transmitted)\\b/i.test(s)&&\n  (/\\b\\d{3}\\s*[- ]?\\s*\\d{8}\\b/.test(q)||/check|status|transmitted|sent|accepted/i.test(s));\nif(efc)pb='efc_eawb_check';\nelse if(url&&/(scrape|directory|agents|contacts|introduc|excel|spreadsheet|xlsx|email)/.test(s))pb='scrape_and_draft';\nelse if(/(late|delay|miss|rollover)/.test(s)&&/(appt|appointment|customer|sop|notify|follow)/.test(s))pb='delay_follow_sop';\nelse if(/\\bpod\\b/.test(s)&&/(request|send|email|mail)/.test(s))pb='pod_request';\nelse if(/(report|recap|excel|spreadsheet)/.test(s)&&/(delay|load|shipment)/.test(s))pb='delay_report';\nelse if(/(clickup|task)/.test(s)&&/(create|open|add|update)/.test(s))pb='clickup_task';\n\nif(!pb)return[{json:{...$json,playbook:null,use_llm_planner:true}}];\n\nlet goal=q,steps=[];\nif(pb==='efc_eawb_check'){\n  const m=(q.match(/\\b\\d{3}\\s*[- ]?\\s*\\d{8}\\b/)||[])[0]||null;\n  goal=`Check eAWB transmission status — MAWB ${m||'(from query)'}`;\n  steps=[\n    st('step_1','credential_lookup','credential','Retrieve EFC credentials',{\n      service:'efc',lookup_fields:['efc_username','efc_password','efc_base_url','efc_username_selector','efc_password_selector','efc_login_button_selector']\n    }),\n    st('step_2','efc_browser','efc','Login to EFC and inspect eAWB/FWB',{\n      operation:'FULL_CHECK',session_id:`efc-${$json.session_id||'default'}`,operations:'FULL_CHECK',\n      mawb:m,credentials_from_step:'step_1',timeout:180000,screenshot:true\n    },['step_1'])\n  ];\n}\nreturn[{json:{...$json,playbook:pb,use_llm_planner:false,plan:{goal,steps},validated:true}}];"
+      },
+      "id": "4c339ce0-4d6a-44ef-b5d1-b47134e7ba51",
+      "name": "Freight Playbook1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9504,
+        56224
+      ],
+      "notes": "Deterministic freight playbooks. Domestic billing is approval-gated and uses the EFC Browser Executor. Supports MAWB and R-number (e.g. R263550) billing; R-flows skip Pelicargo/ClickUp."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"qwen2.5:7b-instruct\",\n  \"stream\": false,\n  \"format\": \"json\",\n  \"keep_alive\": \"30m\",\n  \"options\": {\n    \"temperature\": 0,\n    \"num_ctx\": 4096,\n    \"num_predict\": 1400\n  },\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are MOMI Tool-Aware Planner. Select tools ONLY from available_tools. Return ONLY valid JSON with goal and steps. Never invent tools, credentials, identifiers, amounts, URLs, or external results. Preserve user constraints exactly. Use search/read before writes. For prior step outputs, use references in the literal format STEP_ID.FIELD, for example step_1.result. For batch requests create one chain per item. For ClickUp updates, read the current field before changing it; if the existing value is different, set requires_approval=true. Never claim completion.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify(\"REQUEST: \" + ($json.query || \"\") + \"\\nEXPERIENCE: \" + ($json.experience_context || \"\") + \"\\nAVAILABLE TOOLS: \" + ($json.planner_tool_registry ? JSON.stringify($json.planner_tool_registry) : \"[]\")) }}\n    }\n  ]\n}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "03074a4a-16bc-4ac6-a02c-1662f5018b12",
+      "name": "MOMI Tool-Aware Planner",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -8832,
+        56304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const tools=[{name:'credential_lookup',category:'security',family:'credential',description:'Retrieve stored credentials without exposing secrets.',input:['service','lookup_fields','entity_id'],requires_approval:false,idempotent:true},{name:'efc_browser',category:'freight',family:'efc',description:'Execute EFC portal operations.',input:['session_id','operations','mawb','credentials_from_step','timeout','screenshot'],requires_approval:false,idempotent:false},{name:'efc_domestic_billing',category:'freight',family:'efc',description:'Create and save EFC Domestic Billing. Financial write; explicit approval required before Save.',input:['operation','mawb','bill_to','billing_date','doc_number','do_ref_no','gl_period','vat_tax','billing_remark','billing_lines','charge_lines','amount_mode','session_id','credentials_from_step','timeout','screenshot','save'],requires_approval:true,idempotent:false},{name:'pelicargo_resolve_shipment',category:'freight',family:'web',description:'Find exactly one Pelicargo shipment by MAWB.',input:['mawb','url','session_id','timeout'],requires_approval:false,idempotent:true},{name:'browser_open',category:'computer',family:'web',description:'Open webpage.',input:['url','session_id','timeout'],requires_approval:false,idempotent:true},{name:'browser_navigate',category:'computer',family:'web',description:'Navigate browser.',input:['url','session_id','timeout'],requires_approval:false,idempotent:false},{name:'browser_click',category:'computer',family:'web',description:'Click browser element.',input:['selector','session_id','timeout'],requires_approval:false,idempotent:false},{name:'browser_type',category:'computer',family:'web',description:'Fill browser field.',input:['selector','value','press_enter','session_id','timeout'],requires_approval:false,idempotent:false},{name:'browser_extract',category:'computer',family:'web',description:'Extract browser content.',input:['selector','extract_type','attribute','session_id','timeout'],requires_approval:false,idempotent:true},{name:'browser_screenshot',category:'computer',family:'web',description:'Capture browser evidence.',input:['session_id','full_page','label'],requires_approval:false,idempotent:false},{name:'browser_sequence',category:'computer',family:'web',description:'Execute browser sequence.',input:['session_id','operations','timeout','screenshot'],requires_approval:false,idempotent:false},{name:'web_search',category:'computer',family:'web',description:'Search web.',input:['query','recency','domains'],requires_approval:false,idempotent:true},{name:'clickup_search_tasks',category:'business',family:'clickup',description:'Search ClickUp tasks.',input:['query','list_id','status','assignee'],requires_approval:false,idempotent:true},{name:'clickup_get_task',category:'business',family:'clickup',description:'Read ClickUp task and custom fields.',input:['task_id'],requires_approval:false,idempotent:true},{name:'clickup_update_custom_field',category:'business',family:'clickup',description:'Update ClickUp custom field; different existing value requires approval.',input:['task_id','field_name','field_value','expected_existing_value','approval_if_changed'],requires_approval:false,idempotent:true},{name:'clickup_update_task',category:'business',family:'clickup',description:'Update ClickUp task.',input:['task_id','fields'],requires_approval:false,idempotent:true},{name:'clickup_create_task',category:'business',family:'clickup',description:'Create ClickUp task.',input:['name','description','list_id'],requires_approval:false,idempotent:false},{name:'email_search',category:'business',family:'email',description:'Search email.',input:['query'],requires_approval:false,idempotent:true},{name:'email_draft',category:'business',family:'email',description:'Create email draft without sending.',input:['recipient','subject','body','attachments'],requires_approval:false,idempotent:false},{name:'email_send',category:'business',family:'email',description:'Send email; approval required.',input:['recipient','subject','body','attachments'],requires_approval:true,idempotent:false},{name:'calendar_search',category:'business',family:'email',description:'Search calendar.',input:['query','start','end'],requires_approval:false,idempotent:true},{name:'calendar_create',category:'business',family:'email',description:'Create calendar event.',input:['title','start','end','attendees'],requires_approval:false,idempotent:false},{name:'qdrant_memory_search',category:'memory',family:'memory',description:'Search personal memory.',input:['query','top_k'],requires_approval:false,idempotent:true},{name:'qdrant_document_search',category:'knowledge',family:'documents',description:'Search business documents.',input:['query','top_k'],requires_approval:false,idempotent:true},{name:'qdrant_experience_search',category:'experience',family:'memory',description:'Search successful experiences.',input:['query','task_type','top_k'],requires_approval:false,idempotent:true},{name:'qdrant_experience_save',category:'experience',family:'memory',description:'Save verified experience.',input:['task_type','workflow','lessons','verification'],requires_approval:false,idempotent:false},{name:'file_search',category:'computer',family:'computer',description:'Search local files.',input:['query','path'],requires_approval:false,idempotent:true},{name:'file_read',category:'computer',family:'computer',description:'Read local file.',input:['path'],requires_approval:false,idempotent:true},{name:'file_write',category:'computer',family:'artifact',description:'Write local file.',input:['path','content','format'],requires_approval:false,idempotent:false},{name:'python_execute',category:'computer',family:'computer',description:'Execute Python.',input:['code','input_data'],requires_approval:false,idempotent:false},{name:'api_request',category:'business',family:'computer',description:'Call approved API; writes require approval.',input:['method','url','headers','query','body'],requires_approval:true,idempotent:false},{name:'pdf_create',category:'creative',family:'artifact',description:'Create PDF.',input:['content','output_path'],requires_approval:false,idempotent:false},{name:'excel_create',category:'creative',family:'artifact',description:'Create Excel.',input:['path','sheets','data'],requires_approval:false,idempotent:false},{name:'excel_read',category:'creative',family:'artifact',description:'Read Excel.',input:['path','sheet','range'],requires_approval:false,idempotent:true},{name:'powerpoint_create',category:'creative',family:'artifact',description:'Create PowerPoint.',input:['title','slides','output_path'],requires_approval:false,idempotent:false},{name:'report_generate',category:'creative',family:'artifact',description:'Generate report.',input:['title','data','format'],requires_approval:false,idempotent:false},{name:'image_generate',category:'creative',family:'artifact',description:'Generate image.',input:['prompt','size'],requires_approval:false,idempotent:false},{name:'windows_open',category:'computer',family:'computer',description:'Open Windows resource.',input:['target'],requires_approval:false,idempotent:false},{name:'windows_execute',category:'computer',family:'computer',description:'Execute approved Windows command.',input:['command','arguments'],requires_approval:true,idempotent:false}];return[{json:{...$json,tool_registry_version:'4.0.0',tools,planner_tool_registry:tools}}];"
+      },
+      "id": "7cd63494-eb8a-4139-8216-6e18848432dd",
+      "name": "MOMI Tool Registry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9056,
+        56304
+      ],
+      "notes": "V4 executable registry; replaces the previous nested-JSON registry."
+    },
+    {
+      "parameters": {
+        "jsCode": "const incoming=$json;const raw=$input.first()?.json?.message?.content??$input.first()?.json?.response??'';let p;try{const t=String(raw).replace(/```json/gi,'').replace(/```/g,'').trim(),a=t.indexOf('{'),b=t.lastIndexOf('}');if(a<0||b<=a)throw 0;p=JSON.parse(t.slice(a,b+1))}catch(e){return[{json:{...incoming,validated:false,planner_error:'Planner did not return valid JSON'}}]}const reg=incoming.planner_tool_registry||[];const names=new Set(reg.map(x=>x.name));if(!Array.isArray(p.steps)||!p.steps.length)return[{json:{...incoming,validated:false,planner_error:'Planner returned no steps'}}];const ids=new Set(p.steps.map((s,i)=>String(s.id??`step_${i+1}`)));const fam=n=>{if(/^clickup_/.test(n))return'clickup';if(/^efc_/.test(n))return'efc';if(/^credential_/.test(n))return'credential';if(/^pelicargo_/.test(n)||/^(browser_|web_)/.test(n))return'web';if(/^(email_|calendar_)/.test(n))return'email';if(/^qdrant_memory_|^qdrant_experience_/.test(n))return'memory';if(/^qdrant_document_/.test(n))return'documents';if(/^(pdf_|excel_|powerpoint_|report_|image_|file_write)/.test(n))return'artifact';if(/^(windows_|python_execute|file_search|file_read|api_request)/.test(n))return'computer';return null};const steps=p.steps.map((s,i)=>{const id=String(s.id??`step_${i+1}`),tool=String(s.tool??'');let par=s.parameters;if(typeof par==='string'){try{par=JSON.parse(par)}catch(e){par={raw_input:par}}}if(!par||typeof par!=='object'||Array.isArray(par))par=Array.isArray(par)?{operations:par}:{};let deps=Array.isArray(s.depends_on)?s.depends_on.map(String):[];deps=deps.filter(d=>ids.has(d)&&d!==id);return{id,tool,tool_family:s.tool_family||fam(tool),action:s.action??tool,description:s.description??s.action??tool,parameters:par,depends_on:[...new Set(deps)],requires_approval:Boolean(s.requires_approval||reg.find(x=>x.name===tool)?.requires_approval),completed:false,failed:false,retry_count:0,result:null,summary:null,error:null}});const bad=steps.filter(s=>!names.has(s.tool)||!s.tool_family);if(bad.length)return[{json:{...incoming,validated:false,planner_error:'Invalid/unmapped tools: '+bad.map(x=>x.tool).join(', ')}}];return[{json:{...incoming,validated:true,plan:{goal:p.goal??incoming.query??'',steps}}}];"
+      },
+      "id": "c6f0ff1a-6dd1-4c93-a159-138a948ad677",
+      "name": "Validate Tool Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8608,
+        56304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  model: 'qwen2.5:7b-instruct',\n  stream: false,\n  format: 'json',\n  keep_alive: '30m', options: { temperature: 0, num_ctx: 4096, num_predict: 1024 },\n  messages: [\n    {\n      role: 'system',\n      content: 'You are MOMI Recovery Planner. A step failed or the plan became invalid. Create a minimal replacement plan for the remaining goal using the current state. Do not repeat completed steps. Do not create duplicate ClickUp tasks. Preserve approval requirements. Return ONLY JSON with goal and steps. Use id (string), tool (exact registry name), action, parameters (object), depends_on (array), requires_approval. Dependencies may reference existing completed step IDs.'\n    },\n    {\n      role: 'user',\n      content: JSON.stringify({\n        query: $json.query,\n        goal: $json.plan?.goal,\n        plan: $json.plan,\n        state: $json.state,\n        error: $json.tool_result\n      })\n    }\n  ]\n} }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "d2db0475-3154-4aa1-a9ca-5eacfffcf7a8",
+      "name": "MOMI Re-Planner",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -7488,
+        55504
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {model:'qwen2.5:7b-instruct',stream:false,format:'json',keep_alive:'30m',options:{temperature:0,num_ctx:4096,num_predict:900},messages:[{role:'system',content:'You are MOMI Business Goal Verifier. Verify the user goal only from concrete execution evidence. Tool invocation is not proof. Every required step must be completed. For EFC Domestic Billing verify every requested MAWB or R-number/shipment_ref has concrete evidence of a saved billing document, correct Bill To, Billing Date when supplied, Doc Number, DO Ref No, G/L Period when supplied, VAT state when supplied, billing remark when supplied, every requested charge line, and every supplied amount/vendor/ref-pro value. A tool call alone is never proof. Missing evidence means verified=false. For ClickUp verify exact task and final EFT AE #. For batch jobs verify EVERY item. Optional steps (step.optional === true, or ids listed in state.skipped_optional_steps) that failed are NOT missing evidence - note them as unavailable. A field is only missing evidence when the user explicitly supplied a value for it or the goal named it as required; amount_mode 'leave_blank' and null charge/cost amounts are valid, not missing. Missing required evidence means verified=false. Return ONLY JSON: {\"verified\":true|false,\"issues\":[],\"summary\":\"...\",\"evidence\":[]}'},{role:'user',content:JSON.stringify({query:$json.query,goal:$json.plan?.goal,plan:$json.plan,state:$json.state,tool_result:$json.tool_result})}]} }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "aa695067-1908-4758-8fc4-6a4ab9c28bd5",
+      "name": "MOMI Verification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -7488,
+        54288
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.execution_status }}",
+                    "rightValue": "completed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "st-completed"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "completed"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.execution_status }}",
+                    "rightValue": "failed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "st-failed"
+                  },
+                  {
+                    "leftValue": "={{ $json.state.needs_replan }}",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true"
+                    },
+                    "id": "nr-true"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "failed"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.execution_status }}",
+                    "rightValue": "ready",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "st-ready"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "ready"
+            },
+            {
+              "_patch_id": "P9",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state.execution_status }}",
+                    "rightValue": "failed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "st-failed-terminal"
+                  },
+                  {
+                    "leftValue": "={{ $json.state.needs_replan }}",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "false"
+                    },
+                    "id": "nr-false"
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "b905caa6-62be-4f01-b736-bf470bedc895",
+      "name": "Route By Execution Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -7936,
+        54224
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $json.state?.next_step?.parameters || {};\nreturn [{ json: { service: p.service || 'efc', lookup_fields: p.lookup_fields || [], entity_id: p.entity_id || null } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -11200,
+        54848
+      ],
+      "id": "4117a209-d8f3-425f-89c0-c87f3dcb1ec9",
+      "name": "Shape Credential Request"
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Normalize Start Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Approval Secret": {
+      "main": [
+        [
+          {
+            "node": "Normalize Approval Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Start Request": {
+      "main": [
+        [
+          {
+            "node": "Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Experience Search": {
+      "main": [
+        [
+          {
+            "node": "Build Experience Search Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Experience Search Query": {
+      "main": [
+        [
+          {
+            "node": "Parse Experience Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Experience Query": {
+      "main": [
+        [
+          {
+            "node": "Ollama - Embed Experience Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qdrant - Search MOMI_experience": {
+      "main": [
+        [
+          {
+            "node": "Build Planner Experience Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Planner Experience Context": {
+      "main": [
+        [
+          {
+            "node": "Inject Experience Into Planner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inject Experience Into Planner": {
+      "main": [
+        [
+          {
+            "node": "Preserve Original Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preserve Original Request": {
+      "main": [
+        [
+          {
+            "node": "Freight Playbook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MOMI Router": {
+      "main": [
+        [
+          {
+            "node": "Parse Router1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Router1": {
+      "main": [
+        [
+          {
+            "node": "Requires Planning?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Requires Planning?1": {
+      "main": [
+        [
+          {
+            "node": "Prepare Experience Search",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Direct Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use LLM Planner?": {
+      "main": [
+        [
+          {
+            "node": "MOMI Tool Registry",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Validate & Build State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Direct Route": {
+      "main": [
+        [
+          {
+            "node": "Direct Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Build State": {
+      "main": [
+        [
+          {
+            "node": "Find Next Ready Step1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Next Ready Step1": {
+      "main": [
+        [
+          {
+            "node": "Route By Execution Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hold Envelope Before Risk": {
+      "main": [
+        [
+          {
+            "node": "Merge Risk Inputs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Call Risk & Permission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Risk & Permission": {
+      "main": [
+        [
+          {
+            "node": "Merge Risk Inputs",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Risk Inputs": {
+      "main": [
+        [
+          {
+            "node": "Restore After Risk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore After Risk": {
+      "main": [
+        [
+          {
+            "node": "Approval Required?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Required?1": {
+      "main": [
+        [
+          {
+            "node": "Persist Approval State",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hold Envelope For Step",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Approval State": {
+      "main": [
+        [
+          {
+            "node": "WAITING - APPROVAL REQUIRED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hold Envelope For Step": {
+      "main": [
+        [
+          {
+            "node": "Resolve Step References",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MOMI Tool Router1": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE MEMORY - CONNECT EXISTING TOOL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "EXECUTE DOCUMENTS - CONNECT EXISTING TOOL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hub Router",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "EXECUTE CLICKUP - CONNECT EXISTING TOOL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "EXECUTE EMAIL - CONNECT EXISTING TOOL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call Artifact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hub Router",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call MOMI - EFC Browser Executor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Shape Credential Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Capture Tool Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE MEMORY - CONNECT EXISTING TOOL": {
+      "main": [
+        [
+          {
+            "node": "Capture Tool Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE DOCUMENTS - CONNECT EXISTING TOOL": {
+      "main": [
+        [
+          {
+            "node": "Capture Tool Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE CLICKUP - CONNECT EXISTING TOOL": {
+      "main": [
+        [
+          {
+            "node": "Capture Tool Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE EMAIL - CONNECT EXISTING TOOL": {
+      "main": [
+        [
+          {
+            "node": "Capture Tool Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Artifact": {
+      "main": [
+        [
+          {
+            "node": "Capture Tool Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture Tool Result": {
+      "main": [
+        [
+          {
+            "node": "Merge Tool Verify Inputs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Call MOMI - Per Tool Verification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call MOMI - Per Tool Verification": {
+      "main": [
+        [
+          {
+            "node": "Merge Tool Verify Inputs",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Tool Verify Inputs": {
+      "main": [
+        [
+          {
+            "node": "Restore After Tool Verify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore After Tool Verify": {
+      "main": [
+        [
+          {
+            "node": "Commit Tool Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Commit Tool Result": {
+      "main": [
+        [
+          {
+            "node": "Re-plan Required?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Re-plan Required?": {
+      "main": [
+        [
+          {
+            "node": "Hold Envelope Before Replan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Persist Execution State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hold Envelope Before Replan": {
+      "main": [
+        [
+          {
+            "node": "Merge Replan Inputs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "MOMI Re-Planner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Replan Inputs": {
+      "main": [
+        [
+          {
+            "node": "Apply Recovery Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Recovery Plan": {
+      "main": [
+        [
+          {
+            "node": "Persist Execution State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Execution State": {
+      "main": [
+        [
+          {
+            "node": "Find Next Ready Step1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hold Envelope Before Verify": {
+      "main": [
+        [
+          {
+            "node": "Merge Verify Inputs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "MOMI Verification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Verify Inputs": {
+      "main": [
+        [
+          {
+            "node": "Parse Goal Verification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Goal Verification": {
+      "main": [
+        [
+          {
+            "node": "Verified?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verified?": {
+      "main": [
+        [
+          {
+            "node": "VERIFIED - Continue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "DIAGNOSE Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VERIFIED - Continue": {
+      "main": [
+        [
+          {
+            "node": "MOMI Final Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DIAGNOSE Failure": {
+      "main": [
+        [
+          {
+            "node": "FAILED - Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FAILED - Report": {
+      "main": [
+        [
+          {
+            "node": "MOMI Final Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MOMI Final Result": {
+      "main": [
+        [
+          {
+            "node": "Save Experience?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "MOMI Final Response1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Experience?": {
+      "main": [
+        [
+          {
+            "node": "Normalize Successful Experience",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Successful Experience": {
+      "main": [
+        [
+          {
+            "node": "Ollama - Extract Experience",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama - Extract Experience": {
+      "main": [
+        [
+          {
+            "node": "Prepare Experience Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Experience Document": {
+      "main": [
+        [
+          {
+            "node": "Ollama - Create Experience Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama - Create Experience Embedding": {
+      "main": [
+        [
+          {
+            "node": "Prepare Qdrant Point",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Qdrant Point": {
+      "main": [
+        [
+          {
+            "node": "Ensure MOMI_EXPERIENCE Collection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure MOMI_EXPERIENCE Collection": {
+      "main": [
+        [
+          {
+            "node": "Write Experience to Qdrant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Experience to Qdrant": {
+      "main": [
+        [
+          {
+            "node": "Experience Saved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MOMI Final Response1": {
+      "main": [
+        [
+          {
+            "node": "MOMI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unexpected Status - Report": {
+      "main": [
+        [
+          {
+            "node": "MOMI Final Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MOMI Approval Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Approval Secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Approval Request": {
+      "main": [
+        [
+          {
+            "node": "Load Pending MOMI State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Pending MOMI State": {
+      "main": [
+        [
+          {
+            "node": "Approval Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Decision": {
+      "main": [
+        [
+          {
+            "node": "Resume Approved Step",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Approval Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Rejected": {
+      "main": [
+        [
+          {
+            "node": "MOMI Final Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resume Approved Step": {
+      "main": [
+        [
+          {
+            "node": "Hold Envelope For Step",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE WEB - Browser Automation": {
+      "main": [
+        [
+          {
+            "node": "Capture Tool Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hub Router": {
+      "main": [
+        [
+          {
+            "node": "Route by Tool Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Tool Type": {
+      "main": [
+        [
+          {
+            "node": "Prepare Scrape",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Shape Credential Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call MOMI - EFC Browser Executor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call MOMI - Browser Automation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare API Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Scrape": {
+      "main": [
+        [
+          {
+            "node": "Has URL?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has URL?": {
+      "main": [
+        [
+          {
+            "node": "POST scrape",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Scrape No URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST scrape": {
+      "main": [
+        [
+          {
+            "node": "Format Scrape Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Scrape Result": {
+      "main": [
+        [
+          {
+            "node": "Format Hub Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape No URL": {
+      "main": [
+        [
+          {
+            "node": "Format Hub Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call MOMI - Credential Store": {
+      "main": [
+        [
+          {
+            "node": "Format Hub Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call MOMI - EFC Browser Executor": {
+      "main": [
+        [
+          {
+            "node": "Format Hub Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call MOMI - Browser Automation": {
+      "main": [
+        [
+          {
+            "node": "Format Hub Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare API Request": {
+      "main": [
+        [
+          {
+            "node": "Format API Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format API Result": {
+      "main": [
+        [
+          {
+            "node": "Format Hub Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Hub Result": {
+      "main": [
+        [
+          {
+            "node": "Capture Tool Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unknown Tool Fallback1": {
+      "main": [
+        [
+          {
+            "node": "Format Hub Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "MOMI Router",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Invalid Input Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama - Embed Experience Query": {
+      "main": [
+        [
+          {
+            "node": "Qdrant - Search MOMI_experience",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Step References": {
+      "main": [
+        [
+          {
+            "node": "MOMI Tool Router1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Freight Playbook1": {
+      "main": [
+        [
+          {
+            "node": "Use LLM Planner?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MOMI Tool-Aware Planner": {
+      "main": [
+        [
+          {
+            "node": "Validate Tool Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MOMI Tool Registry": {
+      "main": [
+        [
+          {
+            "node": "MOMI Tool-Aware Planner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Tool Plan": {
+      "main": [
+        [
+          {
+            "node": "Validate & Build State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MOMI Re-Planner": {
+      "main": [
+        [
+          {
+            "node": "Merge Replan Inputs",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "MOMI Verification": {
+      "main": [
+        [
+          {
+            "node": "Merge Verify Inputs",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Route By Execution Status": {
+      "main": [
+        [
+          {
+            "node": "Hold Envelope Before Verify",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hold Envelope Before Replan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hold Envelope Before Risk",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unexpected Status - Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape Credential Request": {
+      "main": [
+        [
+          {
+            "node": "Call MOMI - Credential Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "2be77f72b06318efe37915e304b7b80e5945cd2b908d5ffb4094e2d5fa5db6e8"
+  }
+}

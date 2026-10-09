@@ -224,6 +224,33 @@ MOMI_VERIFICATION_BODY = r"""={{ {model:'qwen2.5:7b-instruct',stream:false,forma
 # --------------------------------------------------------------------------- #
 # MOMI Final Response1
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Apply Recovery Plan  (P10 - the dangling $() reference)
+# --------------------------------------------------------------------------- #
+APPLY_RECOVERY_PLAN = r"""const items = $input.all();
+const original = items[0];
+
+let registry = [];
+try {
+  registry = $('MOMI Tool Registry1').first().json.planner_tool_registry ?? [];
+} catch (error) {
+  registry = [];
+}
+const registryByName = new Map(registry.map(t => [t.name, t]));
+
+const kept = original.plan.steps.filter(s => s.completed === true);
+const keptIds = new Set(kept.map(s => String(s.id)));
+const incomingNew = [{ id: 'x', tool: 'credential_lookup', tool_family: 'credential' }]
+  .filter(s => !keptIds.has(String(s.id)));
+
+for (const s of incomingNew) {
+  if (registryByName.size && !registryByName.has(s.tool)) {
+    throw new Error(`Recovery plan selected unregistered tool: ${s.tool}`);
+  }
+}
+return [{ json: { ...original, registry_size: registryByName.size } }];
+"""
+
 MOMI_FINAL_RESPONSE1 = r"""const env = $json;
 const steps = Array.isArray(env.plan?.steps) ? env.plan.steps : [];
 const mark = (s) => s.failed === true ? '❌' : (s.completed === true ? '✅' : '⏸');
@@ -278,6 +305,7 @@ def build_mini_workflow() -> dict:
         code_node("Resolve Step References", RESOLVE_STEP_REFERENCES),
         code_node("Freight Playbook1", FREIGHT_PLAYBOOK1),
         code_node("MOMI Final Response1", MOMI_FINAL_RESPONSE1),
+        code_node("Apply Recovery Plan", APPLY_RECOVERY_PLAN),
         {
             "parameters": {
                 "method": "POST",

@@ -45,6 +45,10 @@ P9  Route By Execution Status  - add an explicit rule for
                                  `failed && needs_replan === false` so the terminal
                                  path is intentional instead of falling through
                                  the switch fallback.
+P10 Apply Recovery Plan         - the node is named `MOMI Tool Registry`, but the
+                                 code called `$('MOMI Tool Registry1')`. That threw
+                                 every time, silently emptying the tool registry, so
+                                 replans were never validated against it.
 
 The script is idempotent: re-running it on an already-patched export applies
 nothing and exits 0.
@@ -393,6 +397,19 @@ const satisfiedIds = new Set([...completedIds, ...skippedOptionalIds]);
         ],
     },
 
+    # ---------------- P10 - Apply Recovery Plan --------------------------- #
+    {
+        "node": "Apply Recovery Plan",
+        "patch_id": "P10a",
+        "title": "fix dangling $('MOMI Tool Registry1') - the node is named 'MOMI Tool Registry'",
+        "replacements": [
+            (
+                "registry = $('MOMI Tool Registry1').first().json.planner_tool_registry ?? [];",
+                "registry = $('MOMI Tool Registry').first().json.planner_tool_registry ?? [];",
+            )
+        ],
+    },
+
     # ---------------- P7 - MOMI Final Response1 -------------------------- #
     {
         "node": "MOMI Final Response1",
@@ -484,25 +501,47 @@ def apply_code_patches(workflow: dict[str, Any], rep: Report, check_only: bool) 
 
         text = p[field]
         changed = False
-        for old, new in patch["replacements"]:
-            # `new` usually contains `old` (we prepend to an existing statement), so
-            # the already-patched test must come FIRST or a second run double-applies.
-            if new in text:
-                rep.skipped.append(f"{patch['patch_id']} {patch['node']}: already patched ({patch['title']})")
+        for idx, (old, new) in enumerate(patch["replacements"]):
+            # Idempotency is subtle and BOTH naive tests are wrong on their own:
+            #   * `new in text`  false-positives when the replacement text also
+            #     occurs elsewhere (},[b],true)); already exists in the R-number
+            #     branch of Freight Playbook1) - the patch is then silently skipped.
+            #   * `old not in text` fails when `new` contains `old` (we prepend to an
+            #     existing statement) - the patch is then applied twice.
+            # So: when `new` contains `old`, stamp a sentinel into the inserted text
+            # and detect on that; otherwise detect on the absence of `old`.
+            if old in new:
+                sentinel = "/*MOMI-PATCH:%s.%d*/" % (patch["patch_id"], idx)
+                new_effective = new.replace(old, sentinel + old, 1)
+            else:
+                sentinel = None
+                new_effective = new
+
+            def already(detail: str) -> None:
+                rep.skipped.append(
+                    f"{patch['patch_id']} {patch['node']}: already patched ({patch['title']}) {detail}"
+                )
+
+            if sentinel and sentinel in text:
+                already("sentinel")
                 continue
+
             count = text.count(old)
             if count == 0:
-                rep.missing.append(
-                    f"{patch['patch_id']} {patch['node']}: TARGET NOT FOUND ({patch['title']})\n"
-                    f"      expected: {old[:160]!r}"
-                )
+                if sentinel is None and new in text:
+                    already("target gone")
+                else:
+                    rep.missing.append(
+                        f"{patch['patch_id']} {patch['node']}: TARGET NOT FOUND ({patch['title']})\n"
+                        f"      expected: {old[:160]!r}"
+                    )
                 continue
             if count > 1:
                 rep.missing.append(
                     f"{patch['patch_id']} {patch['node']}: target is ambiguous ({count} matches) - refusing to patch"
                 )
                 continue
-            text = text.replace(old, new)
+            text = text.replace(old, new_effective)
             changed = True
 
         if changed:

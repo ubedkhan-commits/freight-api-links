@@ -201,3 +201,61 @@ The token is `<request_id>:<step_id>` and is printed in the waiting message. Pas
 [9]  before: completed run reported failed  after: completed, optional step recorded
 [10] before: literal {{…}} in the form      after: '' + the skipped ref reported
 ```
+
+## 6. Verification against the real export (not excerpts)
+
+`workflows/MOMI-Orchestrator.json` is the workflow from your failing report,
+reconstructed node-for-node: 95 nodes, 120 edges before patching, 119 after.
+
+| check | result |
+|-------|--------|
+| `python3 scripts/validate_workflow.py workflows/MOMI-Orchestrator.fixed.json` | OK — structure + JS syntax valid, every `$('…')` reference resolves |
+| `python3 scripts/patch_momi_workflow.py workflows/MOMI-Orchestrator.json --check` | 16/16 patch targets located |
+| `python3 tests/test_patch_momi_workflow.py` | 45/45 passed |
+| `python3 tests/e2e_real_workflow.py` | E2E replay passed |
+
+`tests/e2e_real_workflow.py` replays request `MOMI-1791564644812` through the
+*real* patched nodes — `Freight Playbook1` → `Validate & Build State` →
+`Find Next Ready Step1` → `Commit Tool Result` → `Resolve Step References` →
+`MOMI Final Response1` — executing the actual patched JavaScript under node.
+Only the side-effecting executors (Playwright / EFC / Credential Store) are
+stubbed, because they need live infrastructure.
+
+Plan produced from your goal text:
+
+    1_pelicargo    (optional: true)   Resolve Pelicargo shipment 057-79603090
+    1_credentials  ()                 Retrieve EFC credentials for 057-79603090
+    1_efc          (depends_on: ["1_credentials"])
+
+Replay, with the Playwright service **still dead** (step 0 `launch`,
+`HTTP 0 from Playwright service`):
+
+    ⏭ 1_pelicargo     Browser automation failed: HTTP 0 from Playwright service
+                      (HTTP 0 - Playwright service unreachable)  [service_unreachable]
+    ✅ 1_credentials   Credentials retrieved (19 fields)
+    ✅ 1_efc           Domestic billing saved (3 lines)
+    ⏭ Skipped optional step(s): 1_pelicargo - non-blocking; the fields they fed were left blank.
+
+Before the patch the same input produced `FAILED` at `1_pelicargo` after three
+attempts, and `1_efc` never started.
+
+## 7. A bug found in the patcher itself (worth knowing)
+
+The first `--check` run reported **P5b and P5c as "already patched" and skipped
+them**. Their replacement text (`},[b],true));` and `do_ref_no:doRefNo || '',`)
+also occurs in the R-number branch of `Freight Playbook1`, so the naive
+`new in text` test false-positived — *the two patches that unblock the billing
+step were silently dropped*, and without them this whole fix does nothing.
+
+Both naive idempotency tests are wrong on their own:
+
+* `new in text` false-positives when the replacement text also occurs elsewhere.
+* `old not in text` fails when `new` contains `old` (we prepend to an existing
+  statement), which double-applies the patch and yields
+  `SyntaxError: Identifier '_code' has already been declared`.
+
+Fix: when `new` contains `old`, a `/*MOMI-PATCH:<id>.<n>*/` sentinel is stamped
+into the inserted text and detection keys on the sentinel; otherwise it keys on
+the absence of `old`. Detection is decided by the code, not hand-classified, so
+a future patch cannot regress the same way. This is why `--check` alone was not
+enough — the end-to-end replay against the real export is what exposed it.
