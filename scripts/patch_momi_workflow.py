@@ -66,6 +66,8 @@ from typing import Any
 # --------------------------------------------------------------------------- #
 # P1 - full replacement for the "Format Hub Result" Code node
 # --------------------------------------------------------------------------- #
+FORMAT_HUB_RESULT_SENTINEL = "// MOMI-PATCH-P1: this node now understands the Browser Automation operations[] shape."
+
 FORMAT_HUB_RESULT = r"""// ── Normalise whatever the executor sub-workflow returned into a MOMI tool_result ──
 // PATCH P1: the Browser Automation sub-workflow returns
 //   {session_id, operations:[{success,http_status,error,...}], extracted, combined_text, ...}
@@ -193,6 +195,8 @@ return [{
     }
   }
 }];
+
+// MOMI-PATCH-P1: this node now understands the Browser Automation operations[] shape.
 """
 
 
@@ -258,6 +262,34 @@ CODE_PATCHES: list[dict[str, Any]] = [
                 "failure_reason:(failed&&(_noReplan||_capped||_noData))?(_hint||step.error||'Tool failed'):null}",
             )
         ],
+    },
+
+    # An executor that answers with NOTHING is an infrastructure fault, not a
+    # flaky step: retrying it three times only delays the report.
+    {
+        "node": "Commit Tool Result",
+        "patch_id": "P2e",
+        "title": "treat an empty executor response as fatal (fail fast, do not retry)",
+        "replacements": [
+            (
+                "const _fatal=/service_unreachable|auth_failed/.test(_code);",
+                "const _fatal=/service_unreachable|auth_failed|executor_no_response/.test(_code);",
+            )
+        ]
+    },
+    {
+        "node": "Commit Tool Result",
+        "patch_id": "P2f",
+        "title": "remediation hint for an empty executor response",
+        "replacements": [
+            (
+                "timeout:'The browser service timed out. Raise the step timeout or warm up the service and re-run.'};",
+                "timeout:'The browser service timed out. Raise the step timeout or warm up the service and re-run.',"
+                "executor_no_response:'The executor sub-workflow returned no data at all. Check the sub-workflow is "
+                "active and that THIS workflow calls the right workflow id (re-importing a workflow creates a new id "
+                "and the caller keeps calling the old one), then re-run.'};",
+            )
+        ]
     },
 
     # ---------------- P3 - Find Next Ready Step1 ------------------------- #
@@ -430,10 +462,102 @@ if (env.state?.waiting_for_approval) {""",
             ),
         ],
     },
+
+    # ---------------- P11 - make the build self-identifying ---------------- #
+    # The point: every report now states which build produced it, so "did my
+    # import actually take effect?" is answerable from the report text alone.
+    # This matters because re-importing an n8n workflow creates a NEW workflow
+    # id, and a parent workflow that calls it by id keeps calling the old one.
+    {
+        "node": "Validate & Build State",
+        "patch_id": "P11a",
+        "title": "stamp a patch_level into the envelope",
+        "replacements": [
+            (
+                "waiting_for_approval:false,retry_count:0,approval_history:[],results:{},status:'ready'}",
+                "waiting_for_approval:false,patch_level:'momi-p11',retry_count:0,approval_history:[],results:{},status:'ready'}",
+            )
+        ]
+    },
+    {
+        "node": "MOMI Final Response1",
+        "patch_id": "P11b",
+        "title": "print the patch level in the report so an unpatched build is obvious",
+        "replacements": [
+            (
+                "const response = parts.join('\\n');\n\nreturn [{ json: { ...env, response } }];",
+                "const _patchLevel = env.state?.patch_level || env.patch_level || "
+                "'NONE - this is the UNPATCHED build';\n"
+                "const response = parts.join('\\n') + `\\n\\n[momi patch level: ${_patchLevel}]`;\n\n"
+                "return [{ json: { ...env, response } }];",
+            )
+        ]
+    },
+
+    # P11c/P11d - the fallthrough must never swallow the cause again. Two holes:
+    #   * an ARRAY payload (Execute Workflow can hand back multiple items, and
+    #     $json.data can be a list) matched none of the shape tests;
+    #   * the else branch said only "no structured success result", which told
+    #     the operator nothing about what it actually saw.
+    {
+        "node": "Format Hub Result",
+        "patch_id": "P11c",
+        "title": "unwrap array payloads before shape detection",
+        "replacements": [
+            (
+                "  const c = j.data?.tool_result ?? j.data ?? null;\n"
+                "  const co = (c && typeof c === 'object') ? c : null;",
+                "  let c = j.data?.tool_result ?? j.data ?? null;\n"
+                "  if (Array.isArray(c)) c = c[0];\n"
+                "  const co = (c && typeof c === 'object') ? c : null;",
+            )
+        ]
+    },
+    {
+        "node": "Format Hub Result",
+        "patch_id": "P11d",
+        "title": "the fallthrough reports exactly what it saw instead of hiding it",
+        "replacements": [
+            (
+                """  } else {
+    r = {
+      success: false,
+      data: co,
+      summary: 'Executor returned no structured success result.',
+      output: '',
+      tool: step.tool,
+      action: step.action,
+      error: 'unstructured_executor_result'
+    };
+  }""",
+                """  } else {
+    const shape = (c === null || c === undefined)
+      ? String(c)
+      : (Array.isArray(c) ? `array(${c.length})` : (Object.keys(c).slice(0, 12).join(',') || '{}'));
+    const payloadKeys = Object.keys(j || {}).slice(0, 12).join(',');
+    const empty = (c === null || c === undefined) || (Array.isArray(c) && c.length === 0);
+    r = {
+      success: false,
+      data: co,
+      summary: `Executor returned no recognisable result (data=${shape}; payload keys=[${payloadKeys}]).`,
+      output: '',
+      tool: step.tool,
+      action: step.action,
+      error: empty ? 'executor_no_response' : (classify(JSON.stringify(c ?? {})) || 'unstructured_executor_result')
+    };
+  }""",
+            ),
+            (
+                "if (r.error && (r.error === 'executor_failed' || r.error === 'unstructured_executor_result')) {",
+                "if (r.error && (r.error === 'executor_failed' || r.error === 'unstructured_executor_result' || r.error === 'executor_no_response')) {",
+            )
+        ]
+    },
 ]
 
 FULL_CODE_PATCHES: list[dict[str, str]] = [
     {"node": "Format Hub Result", "patch_id": "P1", "code": FORMAT_HUB_RESULT,
+     "sentinel": FORMAT_HUB_RESULT_SENTINEL,
      "title": "understand the Browser Automation response shape"},
 ]
 
@@ -479,12 +603,14 @@ def apply_full_code(workflow: dict[str, Any], rep: Report, check_only: bool) -> 
         if field is None:
             rep.missing.append(f"{item['patch_id']}: node '{item['node']}' has no jsCode/code field")
             continue
-        if p[field] == item["code"]:
+        sentinel = item.get("sentinel")
+        # Marker-based, not equality: a later patch (P11c/P11d) edits the code this
+        # one installs, so equality would re-apply P1 forever and silently undo them.
+        if (sentinel and sentinel in p[field]) or p[field] == item["code"]:
             rep.skipped.append(f"{item['patch_id']} {item['node']}: already patched ({item['title']})")
             continue
         rep.applied.append(f"{item['patch_id']} {item['node']}: {item['title']}")
-        if not check_only:
-            p[field] = item["code"]
+        p[field] = item["code"]
 
 
 def apply_code_patches(workflow: dict[str, Any], rep: Report, check_only: bool) -> None:
@@ -546,8 +672,7 @@ def apply_code_patches(workflow: dict[str, Any], rep: Report, check_only: bool) 
 
         if changed:
             rep.applied.append(f"{patch['patch_id']} {patch['node']}: {patch['title']}")
-            if not check_only:
-                p[field] = text
+            p[field] = text
 
 
 def apply_connection_patch(workflow: dict[str, Any], rep: Report, check_only: bool) -> None:
@@ -576,8 +701,7 @@ def apply_connection_patch(workflow: dict[str, Any], rep: Report, check_only: bo
         "P8 MOMI Tool Router1: removed duplicate 'Capture Tool Result' link from the computer-family "
         "output (it made every python_execute / api_request / windows_* step run twice and fail instantly)"
     )
-    if not check_only:
-        outputs[6] = kept
+    outputs[6] = kept
 
 
 def apply_switch_patch(workflow: dict[str, Any], rep: Report, check_only: bool) -> None:
@@ -627,11 +751,18 @@ def apply_switch_patch(workflow: dict[str, Any], rep: Report, check_only: bool) 
         f"P9 {STATUS_SWITCH_NODE}: added explicit rule for 'failed && needs_replan === false' "
         f"(output {index} -> terminal report) instead of relying on the switch fallback"
     )
-    if not check_only:
-        rules.append(rule)
+    rules.append(rule)
 
 
 def patch(workflow: dict[str, Any], check_only: bool = False) -> Report:
+    """Apply every patch to `workflow` (an in-memory copy) and report.
+
+    The mutation is unconditional, even with check_only=True: several patches
+    target text that an earlier patch introduces (P2e refines the line P2a
+    inserts; P11c/P11d refine the node P1 rewrites). Refusing to mutate under
+    --check made those unvalidatable. The caller decides whether to write the
+    result back to disk.
+    """
     rep = Report()
     apply_full_code(workflow, rep, check_only)
     apply_code_patches(workflow, rep, check_only)

@@ -126,6 +126,8 @@ def main(argv: list[str]) -> int:
 
     # ── 2. envelope ──────────────────────────────────────────────────────────
     env = run_node(node(wf, "Validate & Build State"), env)[0]["json"]
+    check("envelope is stamped with a patch level",
+          env["state"].get("patch_level") == "momi-p11", str(env["state"].get("patch_level")))
 
     # ── 3. Format Hub Result sees the real HTTP 0 payload ─────────────────────
     print("\n[2] Format Hub Result classifies the real HTTP 0 payload")
@@ -200,8 +202,27 @@ def main(argv: list[str]) -> int:
           env["state"]["execution_status"] == "completed",
           f"{env['state']['execution_status']} / current={env['state'].get('current_step')}")
 
+    # ── 8b. the fallthrough must never hide the cause again ───────────────────
+    print("\n[5] malformed executor payloads are now diagnosed, not swallowed")
+    fmt = node(wf, "Format Hub Result")
+
+    wrapped = run_node(fmt, {"data": [HTTP0]})[0]["json"]["tool_result"]
+    check("a list-wrapped payload is unwrapped and still classified",
+          wrapped["error"] == "service_unreachable", json.dumps(wrapped)[:200])
+
+    empty = run_node(fmt, {"data": None})[0]["json"]["tool_result"]
+    check("an empty payload is reported as executor_no_response",
+          empty["error"] == "executor_no_response", json.dumps(empty)[:200])
+    check("the empty-payload summary says what it saw",
+          "data=null" in empty["summary"] and "payload keys=" in empty["summary"],
+          empty["summary"])
+
+    junk = run_node(fmt, {"data": {"weird": 1}})[0]["json"]["tool_result"]
+    check("an unknown shape names its keys instead of 'no structured result'",
+          "weird" in junk["summary"], junk["summary"])
+
     # ── 9. report ────────────────────────────────────────────────────────────
-    print("\n[5] final report")
+    print("\n[6] final report")
     env["final_status"] = "VERIFIED"
     env["success"] = True
     out = run_node(node(wf, "MOMI Final Response1"), env)[0]["json"]
@@ -212,6 +233,9 @@ def main(argv: list[str]) -> int:
           "⏭ 1_pelicargo" in out["response"] and "❌ 1_pelicargo" not in out["response"])
     check("billing step shown as done", "✅ 1_efc" in out["response"])
     check("report explains the skip", "Skipped optional step" in out["response"])
+    check("report states which build produced it",
+          "[momi patch level: momi-p11]" in out["response"],
+          out["response"][-120:])
 
     print()
     if FAILURES:

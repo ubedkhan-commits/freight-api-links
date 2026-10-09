@@ -225,6 +225,11 @@ MOMI_VERIFICATION_BODY = r"""={{ {model:'qwen2.5:7b-instruct',stream:false,forma
 # MOMI Final Response1
 # --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
+# Validate & Build State  (P11a - patch_level stamp)
+# --------------------------------------------------------------------------- #
+VALIDATE_AND_BUILD_STATE = r"""const input=$json;if(!input.plan||!Array.isArray(input.plan.steps)||!input.plan.steps.length)return[{json:{...input,final_status:'PLANNER_FAILED',success:false,message:'MOMI could not produce a valid execution plan.',state:{execution_status:'failed',status:'failed',needs_replan:false,all_steps_completed:false,results:{}}}}];const steps=input.plan.steps.map((s,i)=>({...s,id:String(s.id??`step_${i+1}`),parameters:s.parameters&&typeof s.parameters==='object'&&!Array.isArray(s.parameters)?s.parameters:{},depends_on:Array.isArray(s.depends_on)?s.depends_on.map(String):[],completed:false,failed:false,retry_count:0,result:null,summary:null,error:null}));return[{json:{...input,request_id:input.request_id??`MOMI-${Date.now()}`,session_id:input.session_id??'new_session',query:input.query??input.original_query??'',original_query:input.original_query??input.query??'',chatInput:input.chatInput??input.query??'',plan:{goal:input.plan.goal??input.query??'',steps},state:{execution_status:'ready',current_step:null,next_step:null,all_steps_completed:false,needs_replan:false,waiting_for_approval:false,retry_count:0,approval_history:[],results:{},status:'ready'},tool_result:null,verification:null}}];"""
+
+# --------------------------------------------------------------------------- #
 # Apply Recovery Plan  (P10 - the dangling $() reference)
 # --------------------------------------------------------------------------- #
 APPLY_RECOVERY_PLAN = r"""const items = $input.all();
@@ -305,6 +310,7 @@ def build_mini_workflow() -> dict:
         code_node("Resolve Step References", RESOLVE_STEP_REFERENCES),
         code_node("Freight Playbook1", FREIGHT_PLAYBOOK1),
         code_node("MOMI Final Response1", MOMI_FINAL_RESPONSE1),
+        code_node("Validate & Build State", VALIDATE_AND_BUILD_STATE),
         code_node("Apply Recovery Plan", APPLY_RECOVERY_PLAN),
         {
             "parameters": {

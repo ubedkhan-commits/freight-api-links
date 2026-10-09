@@ -259,3 +259,69 @@ into the inserted text and detection keys on the sentinel; otherwise it keys on
 the absence of `old`. Detection is decided by the code, not hand-classified, so
 a future patch cannot regress the same way. This is why `--check` alone was not
 enough — the end-to-end replay against the real export is what exposed it.
+
+## 8. Why run 2 (MAWB 125-20580103) failed identically
+
+The second run produced exactly the same three lines. The patched build renders
+that first line as `⏭ … (error: service_unreachable)`, never
+`❌ … (error: unstructured_executor_result)`, so **the workflow that served the
+run was the original**.
+
+`⏸ 1_efc` is not evidence that the billing step was reached. `⏸` is the marker
+for *"neither completed nor failed"* — i.e. it never ran:
+
+    const mark = (s) => s.failed === true ? '❌' : (s.completed === true ? '✅' : '⏸');
+
+### The cause: importing a workflow creates a NEW workflow id
+
+`MOMI-Orchestrator` has no webhook entry point of its own for runs. Its trigger
+is **`When Executed by Another Workflow`** — a parent workflow calls it by
+workflow id. `Workflows → Import from File` creates a brand-new workflow with a
+brand-new id; the parent's `Execute Workflow` node still points at the old one.
+The fixed JSON sat in the workspace, inactive, while every run went to the old
+copy.
+
+**To apply it, either:**
+
+* open the *existing* MOMI-Orchestrator and use `⋯ → Import from File` (or paste
+  the JSON) so the content is replaced **in place and the id is preserved** —
+  this is the safe option; **or**
+* import as a new workflow and then re-point the parent workflow's
+  `Execute Workflow` node to the new id, and deactivate the old one.
+
+### P11 — the build now identifies itself
+
+To make this unambiguous from now on, every report ends with:
+
+    [momi patch level: momi-p11]
+
+and an unpatched build prints `[momi patch level: NONE - this is the UNPATCHED
+build]`. If that line says `NONE`, the fix is not running, whatever the file on
+disk says.
+
+### P11c / P11d — the fallthrough can no longer hide the cause
+
+Two holes remained in `Format Hub Result`:
+
+* **Array payloads never matched.** `Execute Workflow` can hand back multiple
+  items, and `$json.data` may be a list. The shape tests all looked for object
+  properties, so a list fell straight through to the `else`. Payloads are now
+  unwrapped before detection.
+* **The `else` said nothing useful.** "Executor returned no structured success
+  result." is now
+  `Executor returned no recognisable result (data=null; payload keys=[…]).`,
+  listing the shape it actually saw — and an empty payload is classified
+  `executor_no_response`, which `Commit Tool Result` treats as fatal (fail fast,
+  no retry, no LLM re-plan) with a hint naming this workflow-id trap.
+
+### A second bug in the tooling: `--check` could not see chained patches
+
+`--check` refused to mutate the in-memory workflow, so any patch that targets
+text an *earlier* patch introduces (P2e refines P2a's line; P11c/P11d refine the
+node P1 installs) was always reported `TARGET NOT FOUND`. Check mode now applies
+patches to the in-memory copy like a normal run — only the file write is
+suppressed. Separately, P1's idempotency test used exact equality against the
+replacement code, which P11c/P11d then invalidate; it is marker-based now.
+
+Current state: **22 patches**, 45 unit checks, and the end-to-end replay all
+passing against the real 95-node export.
